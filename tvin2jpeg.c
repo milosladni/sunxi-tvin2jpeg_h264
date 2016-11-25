@@ -140,7 +140,6 @@ typedef enum VeSubengTypeTag {
 typedef enum scalerTypeTag {
     ARBITRARY_VGA = 1,
     ARBITRARY_QVGA,
-    DIVIDE_PAL
 } scalerType_t;
 
 typedef struct frameTag {
@@ -158,22 +157,15 @@ typedef struct CameraTag {
     uint32_t        CplaneSize;
     unsigned int    bytesperline;                                               /* bytes per line */
     long unsigned int   rawSize;                                                /* raw image size */
-    /* buffers */
-    Buffer_t            buffers[MAX_BUFFERS];                                   /* camera buffers */
-    unsigned int        n_buffers;                                 /* number of allocated buffers */
-} Camera_t;
-
-typedef struct sourceTag {
-    Size_t      size;                                                              /* source size */
-    uint32_t    YplaneSize;                                                          /* luma size */
-    uint32_t    CplaneSize;                                                        /* chroma size */
-    uint64_t    rawSize;                                                        /* raw image size */
     uint32_t    mb_width;                                           /* width in 16x16 macroblocks */
     uint32_t    mb_height;                                         /* height in 16x16 macroblocks */
     uint32_t    mb_stride;                                         /* stride in 16x16 macroblocks */
     uint32_t    crop_right;
     uint32_t    crop_bottom;
-} source_t;
+    /* buffers */
+    Buffer_t            buffers[MAX_BUFFERS];                                   /* camera buffers */
+    unsigned int        n_buffers;                                 /* number of allocated buffers */
+} Camera_t;
 
 typedef struct DisplayTag {
     int                 fd;                                      /* display driver fd (/dev/disp) */
@@ -207,16 +199,13 @@ typedef struct JpegEncTag { /* jpeg enc param */
 } JpegEnc_t;
 
 typedef struct ScalerTag {                                                        /* scaler param */
-    scalerType_t    type;          /* arbitrary-scaler or divide-scaler to VGA or QVGA resolution */
+    scalerType_t    type;                           /* arbitrary-scaler to VGA or QVGA resolution */
     Size_t          size;
     uint64_t        rawSize;                                                        /* raw image size */
     uint32_t        YplaneSize;
     uint32_t        CplaneSize;
     float           xScaleFactor;
     float           yScaleFactor;
-    /* scaled source buffers */
-	uint8_t *YscaledSrc;                                                    /* scaled luma buffer */
-	uint8_t *CscaledSrc;                                                  /* scaled chroma buffer */
     
     uint32_t    mb_width;                                           /* width in 16x16 macroblocks */
     uint32_t    mb_height;                                         /* height in 16x16 macroblocks */
@@ -293,7 +282,6 @@ typedef struct ApplTag {
     bool_t              yuvToRgb;
     //
     frame_t             frame;
-    source_t            source;                                             /* source frame param */
     Camera_t            camera;                                                   /* camera param */
     Display_t           disp;                                               /* display parameters */
     JpegEnc_t           jpegEnc;                                           /* jpeg encoder params */
@@ -352,17 +340,14 @@ static void JpegEnc_encodePicture__(const void *pFrame, int frameSize);
 //hw VE (VideoEngine)
 static void Ve_init__(void);
 static void Ve_allocInputBuffers__(void);
-static void Ve_allocScalerBuffers__(void);
 static void Ve_allocOutputBuffers__(void);
+static void Ve_initScalerBuffers__(void);
 static void Ve_fillInputBuffers__(const void *pFrame, int frameSize);
 static void Ve_selectSubengine__(VeSubengType_t subengine);
 static void Ve_trigerSubebgine__(VeSubengType_t subengine);
 static void Ve_veisp_setInputBuffers__(uint8_t *Y, uint8_t *C);
-static void Ve_veisp_setDivideScalerOutputBuffers__(uint8_t *Y, uint8_t *C);
 static void Ve_veisp_initPicture__(uint32_t width_mb, uint32_t height_mb, uint32_t stride_mb, veisp_color_format_t format);
-static void Ve_veisp_initPictureWithDivision__(uint32_t width_mb, uint32_t height_mb, veisp_color_format_t format);
 static void Ve_freeInputBuffers__(void);
-static void Ve_freeScalerBuffers__(void);
 static void Ve_freeOutputBuffers__(void);
 static void Ve_freeMbInfoBuffer__(void);
 static void Ve_free__(void);
@@ -440,7 +425,6 @@ static void usage__(FILE *fp, int argc, char **argv) {
      "                      | 0 -> none                  |\n"
      "                      | 1 -> ARBITRARY-SCALER-VGA  |\n"
      "                      | 2 -> ARBITRARY-SCALER_QVGA |\n"
-     "                      | 3 -> DIVIDE-SCALER-PAL/2   |\n"
      "     --h264Enc       Enable h264Encoder (Default: Disabled)\n"
      "\n",
      argv[0]+2, FW_VERSION, pThis->camera.deviceName);
@@ -481,7 +465,7 @@ static void get_options__ (int argc, char **argv)
             }
             case OPT_SCALE__: {
                 uint32_t type = strtol(optarg, NULL, 0);
-                if (type <= DIVIDE_PAL) {
+                if (type <= ARBITRARY_QVGA) {
                     pThis->ve.isp.scaler.type = type;
                 }
                 break;
@@ -563,33 +547,6 @@ static int xioctl(int fh, int request, void *arg)
     return r;
 }
 
-void Source_init__ (void) {
-    
-    if (pThis->ve.isp.scaler.type == DIVIDE_PAL) {
-        pThis->source.YplaneSize = tjPlaneSizeYUV(0, 640, 0, 480, TJSAMP_420);
-        pThis->source.CplaneSize = tjPlaneSizeYUV(1, 640, 0, 480, TJSAMP_420) << 1;
-        pThis->source.rawSize = tjBufSizeYUV2(640, PADDING, 480, TJSAMP_420);
-        pThis->source.size.width = 640;
-        pThis->source.size.height = 480;
-    } else {
-        pThis->source.YplaneSize = pThis->camera.YplaneSize;
-        pThis->source.CplaneSize = pThis->camera.CplaneSize;
-        pThis->source.rawSize = pThis->camera.rawSize;
-        pThis->source.size.width = pThis->camera.size.width;
-        pThis->source.size.height = pThis->camera.size.height;
-    }
-    
-    /* calculate macroblocks size */
-    pThis->source.mb_width = DIV_ROUND_UP(pThis->source.size.width, 16);
-    pThis->source.mb_height = DIV_ROUND_UP(pThis->source.size.height, 16);
-    pThis->source.mb_stride = pThis->source.size.width / 16;
-    pThis->source.crop_right = (pThis->source.mb_width * 16 - pThis->source.size.width) / 2;
-    pThis->source.crop_bottom = (pThis->source.mb_height * 16 - pThis->source.size.height) / 2;
-    
-    /* set color format */
-    pThis->ve.isp.colorFormat = VEISP_COLOR_FORMAT_NV12;
-}
-
 int main(int argc, char* argv[]) {
     
 	struct sigaction sigact;
@@ -614,7 +571,6 @@ int main(int argc, char* argv[]) {
 	/* initialize camera input - video source */
     Camera_init__();
     Camera_mapBuffers__();
-    Source_init__();
     
     /* initialize thread */
     CriticalSectionCreate__();
@@ -627,7 +583,7 @@ int main(int argc, char* argv[]) {
     /* initialize VE - Video Engine */
     Ve_init__();
     Ve_allocInputBuffers__();
-    Ve_allocScalerBuffers__();
+    Ve_initScalerBuffers__();
     Ve_allocOutputBuffers__();
     usleep(10000);                                                                                  //todo delete
     
@@ -694,7 +650,6 @@ int main(int argc, char* argv[]) {
     
     /* uninitialize hwve */
     Ve_freeOutputBuffers__();
-    Ve_freeScalerBuffers__();
     Ve_freeInputBuffers__();
     Ve_free__();
 close:
@@ -1056,8 +1011,6 @@ static void Tvin2jpeg_initVars__ (void) {
     pThis->ve.pRegs = NULL;
     pThis->ve.pLumaSrc = NULL;
     pThis->ve.pChromaSrc = NULL;
-    pThis->ve.isp.scaler.YscaledSrc = NULL;
-    pThis->ve.isp.scaler.CscaledSrc = NULL;
     //
     pThis->run = TRUE;
     pThis->maxTimeForOneFrame = 0;
@@ -1158,11 +1111,18 @@ static void Camera_init__ (void) {
 	printf("status[2]=%d\n", fmt_priv.fmt.raw_data[18]);
 	printf("status[3]=%d\n", fmt_priv.fmt.raw_data[19]);
     
+    /* calculate source planes size */
     pThis->camera.YplaneSize = tjPlaneSizeYUV(0, pThis->camera.size.width, 0, 
                                                  pThis->camera.size.height, TJSAMP_420);
     pThis->camera.CplaneSize = (tjPlaneSizeYUV(1, pThis->camera.size.width, 0, 
                                                   pThis->camera.size.height, TJSAMP_420)) << 1;
-                                 
+    /* calculate macroblocks size */
+    pThis->camera.mb_width = DIV_ROUND_UP(pThis->camera.size.width, 16);
+    pThis->camera.mb_height = DIV_ROUND_UP(pThis->camera.size.height, 16);
+    pThis->camera.mb_stride = pThis->camera.size.width / 16;
+    pThis->camera.crop_right = (pThis->camera.mb_width * 16 - pThis->camera.size.width) / 2;
+    pThis->camera.crop_bottom = (pThis->camera.mb_height * 16 - pThis->camera.size.height) / 2;
+
     printf("Picture Info from VIDIOC_G_FMT: %dx%d, bytesperline: %d, rawSize: %ld\n", 
                 pThis->camera.size.width, pThis->camera.size.height, 
                 pThis->camera.bytesperline, pThis->camera.rawSize);
@@ -1498,7 +1458,6 @@ static void JpegEnc_encodePicture__ (const void *pFrame, int frameSize) {
     
     static int          id = 0;
     int                 retval;
-    char               *pCropFrame = NULL;
     int                 flags = TJFLAG_FASTDCT;
     unsigned long       yuvBuffSize;
     long unsigned int   _jpegSize;
@@ -1635,45 +1594,13 @@ static void JpegEnc_encodePicture__ (const void *pFrame, int frameSize) {
         /* compress image to jpeg by hardware */
         // flush output buffer, otherwise we might read old cached data
         ve_flush_cache(pThis->jpegEnc.hwj.JpegBuff, MAX_JPEG_SIZE);
-        if (pThis->ve.isp.scaler.type == DIVIDE_PAL) {                  /* use divivde-scaler */
-            /* first crop source to VGA resolution */
-            if ((pCropFrame = (char*)malloc(pThis->source.rawSize)) == NULL) {
-                DBG("ERROR: Memory allocation for cropping failure: %d", __LINE__);
-                goto bailout;
-            }
-            memset(pCropFrame, 0x80, pThis->source.rawSize);
-            /* crop source frame to VGA 640x480 */
-            crop_nv12__((char*)pFrame, pCropFrame, pThis->camera.size.width, pThis->camera.size.height,
-                        pThis->source.size.width, pThis->source.size.height);
-            /* fill the buffers */
-            Ve_fillInputBuffers__(pCropFrame, pThis->source.rawSize);
-            /* scale VGA to QVGA */
-            Ve_selectSubengine__(SUBENG_ISP);                       /* select VEISP subengine */
-            Ve_veisp_setDivideScalerOutputBuffers__(pThis->ve.isp.scaler.YscaledSrc, 
-                                                      pThis->ve.isp.scaler.CscaledSrc);
-            Ve_veisp_initPictureWithDivision__(pThis->source.mb_width, pThis->source.mb_height, 
-                                               pThis->ve.isp.colorFormat);
-        } else {
-            Ve_fillInputBuffers__(pFrame, frameSize);
-            Ve_selectSubengine__(SUBENG_AVCENC);
-            Ve_veisp_initPicture__(pThis->source.mb_width, pThis->source.mb_height,
-                                   pThis->source.mb_stride, pThis->ve.isp.colorFormat);
-        }
+        Ve_fillInputBuffers__(pFrame, frameSize);
+        Ve_selectSubengine__(SUBENG_AVCENC);
+        Ve_veisp_initPicture__(pThis->camera.mb_width, pThis->camera.mb_height,
+                               pThis->camera.mb_stride, pThis->ve.isp.colorFormat);
         Ve_veisp_setInputBuffers__(pThis->ve.pLumaSrc, pThis->ve.pChromaSrc);
 
-        if (pThis->ve.isp.scaler.type == DIVIDE_PAL) {                   /* use divide scaler */
-            DBG("Use divide scaler");
-            Ve_trigerSubebgine__(SUBENG_ISP);                       /* triger divide-scaler */
-            /* flush output buffers */
-            ve_flush_cache(pThis->ve.isp.scaler.YscaledSrc, pThis->ve.isp.scaler.rawSize);
-            veavc_release_subengine();
-            Ve_selectSubengine__(SUBENG_AVCENC);
-            Ve_veisp_setInputBuffers__(pThis->ve.isp.scaler.YscaledSrc, 
-                                         pThis->ve.isp.scaler.CscaledSrc);
-            Ve_veisp_initPicture__(pThis->ve.isp.scaler.mb_width, 
-                                pThis->ve.isp.scaler.mb_height, pThis->ve.isp.scaler.mb_stride, 
-                                pThis->ve.isp.colorFormat);
-        } else if (pThis->ve.isp.scaler.type > 0) {             /* use arbitrary scaler engine */
+        if (pThis->ve.isp.scaler.type > 0) {                       /* use arbitrary scaler engine */
             //DBG("Use arbitrary scaler");
             veisp_set_scaler(pThis->ve.isp.scaler.size.width, pThis->ve.isp.scaler.size.height, 
                   0.0, 0.0, pThis->ve.isp.scaler.xScaleFactor, pThis->ve.isp.scaler.yScaleFactor);
@@ -1712,12 +1639,6 @@ static void JpegEnc_encodePicture__ (const void *pFrame, int frameSize) {
     }
 
 bailout:
-    if (pThis->ve.isp.scaler.type == DIVIDE_PAL) {
-        if (pCropFrame != NULL) {
-            free(pCropFrame);
-            DBG("Free crop buffer!");
-        }
-    }
     id++;
 }
 
@@ -1757,7 +1678,7 @@ static void Ve_allocInputBuffers__ (void) {
     DBGF("Ysize: %d, Csize: %d", pThis->camera.YplaneSize, pThis->camera.CplaneSize);
 }
 
-static void Ve_allocScalerBuffers__ (void) {
+static void Ve_initScalerBuffers__ (void) {
 
     switch (pThis->ve.isp.scaler.type) {
         /* ARBITRARY-SCALER */
@@ -1773,13 +1694,6 @@ static void Ve_allocScalerBuffers__ (void) {
             pThis->ve.isp.scaler.size.height = 240;
             pThis->ve.isp.scaler.xScaleFactor = 320.0f / pThis->camera.size.width;
             pThis->ve.isp.scaler.yScaleFactor = 240.0f / pThis->camera.size.height;
-            break;
-        }
-        /* DIVIDE_SCALER: for vga-qvga resolutions you can crop picture to VGA by software and 
-         * than scale it with divide-sclaer to QVGA */
-        case DIVIDE_PAL: {
-            pThis->ve.isp.scaler.size.width = 320;
-            pThis->ve.isp.scaler.size.height = 240;
             break;
         }
         default: {                                                          /* scaler is not used */
@@ -1804,19 +1718,6 @@ static void Ve_allocScalerBuffers__ (void) {
                                                  pThis->ve.isp.scaler.size.height, TJSAMP_420)) << 1;
     pThis->ve.isp.scaler.rawSize = pThis->ve.isp.scaler.YplaneSize + pThis->ve.isp.scaler.CplaneSize;
 
-    if (pThis->ve.isp.scaler.type == DIVIDE_PAL) {
-        /* allocate memory from VE */
-        pThis->ve.isp.scaler.YscaledSrc = ve_malloc(pThis->ve.isp.scaler.rawSize);
-        if (!pThis->ve.isp.scaler.YscaledSrc) {
-            DBG("ERROR: Cannot allocate scaler buffers!");
-            exit(EXIT_FAILURE);
-        }
-        pThis->ve.isp.scaler.CscaledSrc = pThis->ve.isp.scaler.YscaledSrc + 
-                                          pThis->ve.isp.scaler.YplaneSize;
-        memset(pThis->ve.isp.scaler.YscaledSrc, 0x80, pThis->ve.isp.scaler.rawSize);
-        ve_flush_cache(pThis->ve.isp.scaler.YscaledSrc, pThis->ve.isp.scaler.rawSize);
-    }
-    
     DBGF("SCALER: %dx%d, YscaledSize: %d, CscaledSize: %d, xFactor: %.3f, yFactor:%.3f",
             pThis->ve.isp.scaler.size.width, pThis->ve.isp.scaler.size.height, 
             pThis->ve.isp.scaler.YplaneSize, pThis->ve.isp.scaler.CplaneSize, 
@@ -1834,10 +1735,10 @@ static void Ve_allocOutputBuffers__ (void) {
 
 static void Ve_fillInputBuffers__ (const void *pFrame, int frameSize) {
     
-    //DBGF("YplaneSize: %d, CplaneSize: %d => %p, %p", pThis->source.YplaneSize, 
-            //pThis->source.CplaneSize, pFrame, pFrame + pThis->source.YplaneSize);
+    //DBGF("YplaneSize: %d, CplaneSize: %d => %p, %p", pThis->camera.YplaneSize, 
+            //pThis->camera.CplaneSize, pFrame, pFrame + pThis->camera.YplaneSize);
     memcpy(pThis->ve.pLumaSrc, pFrame, frameSize);
-    //memcpy(pThis->ve.pChromaSrc, pFrame + pThis->source.YplaneSize, pThis->source.CplaneSize);
+    //memcpy(pThis->ve.pChromaSrc, pFrame + pThis->camera.YplaneSize, pThis->camera.CplaneSize);
 
 	/* flush for A20 */
 	ve_flush_cache(pThis->ve.pLumaSrc, frameSize);
@@ -1886,32 +1787,14 @@ static void Ve_veisp_setInputBuffers__ (uint8_t *Y, uint8_t *C) {
     veisp_set_buffers(Y, C);
 }
 
-static void Ve_veisp_setDivideScalerOutputBuffers__ (uint8_t *Y, uint8_t *C) {
-
-    veisp_set_outputBuffers(Y, C);
-}
-
 static void Ve_veisp_initPicture__ (uint32_t width_mb, uint32_t height_mb, uint32_t stride_mb, veisp_color_format_t format) {
 
     veisp_init_pictureMb(width_mb, height_mb, stride_mb, format);
 }
 
-static void Ve_veisp_initPictureWithDivision__ (uint32_t width_mb, uint32_t height_mb, 
-                                              veisp_color_format_t format) {
-
-    veisp_init_pictureMbWithDivision(width_mb, height_mb, format);
-}
-
 static void Ve_freeInputBuffers__ (void) {
 
     ve_free(pThis->ve.pLumaSrc);
-}
-
-static void Ve_freeScalerBuffers__ (void) {
-
-    if (pThis->ve.isp.scaler.type == DIVIDE_PAL) {
-        ve_free(pThis->ve.isp.scaler.YscaledSrc);
-    }
 }
 
 static void Ve_freeOutputBuffers__ (void) {
@@ -2055,14 +1938,14 @@ static int H264enc_encodePicture__ (void) {
 	put_slice_header__();
 
 	/* set input size */ /* set input format */
-    Ve_veisp_initPicture__(pThis->source.mb_width, pThis->source.mb_height, pThis->source.mb_stride,
+    Ve_veisp_initPicture__(pThis->camera.mb_width, pThis->camera.mb_height, pThis->camera.mb_stride,
                            pThis->ve.isp.colorFormat);
                            
 	/* set input buffer */
     Ve_veisp_setInputBuffers__(pThis->ve.pLumaSrc, pThis->ve.pChromaSrc);
     
     /* add scaler */
-    if (pThis->ve.isp.scaler.type > 0 && pThis->ve.isp.scaler.type != DIVIDE_PAL) {
+    if (pThis->ve.isp.scaler.type > 0) {
         /* use arbitrary scaler engine */
         //DBG("Use arbitrary scaler for h264");
         veisp_set_scaler(pThis->ve.isp.scaler.size.width, pThis->ve.isp.scaler.size.height,
@@ -2190,13 +2073,13 @@ static void put_seq_parameter_set__ (void) {
 
 	put_bits__(/* direct_8x8_inference_flag = */ 0, 1);
 
-	frameCroppingFlag = pThis->source.crop_right || pThis->source.crop_bottom;
+	frameCroppingFlag = pThis->camera.crop_right || pThis->camera.crop_bottom;
 	put_bits__(frameCroppingFlag, 1);
 	if (frameCroppingFlag) {
 		put_ue__(0);
-		put_ue__(pThis->source.crop_right);
+		put_ue__(pThis->camera.crop_right);
 		put_ue__(0);
-		put_ue__(pThis->source.crop_bottom);
+		put_ue__(pThis->camera.crop_bottom);
 	}
 
 	put_bits__(/* vui_parameters_present_flag = */ 0, 1);
@@ -2340,8 +2223,8 @@ static void yuv422YUYV_YUY2_2rgb__ (char *pIn, char *pOut, unsigned long len) {/
     }
 }
 
-static void crop_nv12__ (char *pSrc, char *pDst, uint32_t srcWidth, uint32_t srcHeight, 
-                         uint32_t dstWidth, uint32_t dstHeight) {
+__attribute__((unused)) static void crop_nv12__ (char *pSrc, char *pDst, uint32_t srcWidth, 
+                                        uint32_t srcHeight, uint32_t dstWidth, uint32_t dstHeight) {
                             
     /* crop the middle of 4:2:0 NV12 source image */
     uint32_t    i;

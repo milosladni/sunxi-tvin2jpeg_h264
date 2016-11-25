@@ -22,12 +22,9 @@ Modified by Milos Ladicorbic milos.ladicorbic@gmail.com
 I merged this three PoC software and tested it on Allwinner A20 (awsomA20 - https://aw-som.com/product_info.php?products_id=32).
 
 Licence:
-Because appl also use libjpegturbo read libjpegturbo licence:
+Because appl also uses libjpegturbo read libjpegturbo licence:
 LICENSE.md or https://github.com/libjpeg-turbo/libjpeg-turbo/blob/master/LICENSE.md
 This software is based in part on the work of the Independent JPEG Group.
-
-Known bugs:
-- Divide scaler does not work well. It scale only first frame for now..
 
 Limitations:
 - no B frames
@@ -56,7 +53,6 @@ Usage:
      "                      | 0 -> none                  |\n"
      "                      | 1 -> ARBITRARY-SCALER-VGA  |\n"
      "                      | 2 -> ARBITRARY-SCALER_QVGA |\n"
-     "                      | 3 -> DIVIDE-SCALER-PAL/2   |\n"
      "     --h264Enc       Enable h264Encoder (Default: Disabled)\n"
 
 Examples:

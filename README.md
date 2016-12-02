@@ -3,7 +3,8 @@ tvin2jpeg Licenses
 
 Proof of Concept TV-IN and hardware accelerated H264-JPEG encoder for sunxi.
 Example app for TV-IN, captures N frames from /dev/video1 (tvin cvbs), send output to hdmi or parallel LCD, 
-compress it to jpeg images /tmp/testImageXXX.jpg and/or h264 saving the raw h264 stream to /tmp/tvin/h264.
+compress it to jpeg images /tmp/testImageXXX.jpg and/or h264 saving the raw h264 stream to /tmp/tvin.h264 
+and mux it to mkv container /tmp/tvin.mkv.
 This is a basic example for using the tvin, H264-JPEG hardware encoder for sunxi SoCs.
 This example includes:
 - Using analogue input TV decoder (CVBS).
@@ -68,6 +69,4 @@ $ ./sunxi-tvin2jpeg --p -c 10 -C 10 -q 85 --readFile /tmp/frame_000_yuy2_720x576
 - Take 200 frames from tvin, scale frame with hw veisp from PAL 720x576 to QVGA 320x240, 
 compress it to jpeg with hw encoder, compress it to h264.
 $ time ./sunxi-tvin2jpeg --p -c 200 -C 200 -q 85 --jpegEnc 2 --scale 2 --h264enc --o
-You will have to mux the raw stream to a container to add fps information.
-$ ffmpeg -r 25 -i /tmp/tvin.h264 -vcodec copy /tmp/tvin.mp4
 Play it with vlc, ffplay etc...

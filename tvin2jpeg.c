@@ -54,6 +54,7 @@
 #include <turbojpeg.h>
 #include "debug.h"
 #include "tvin2jpeg_cfg.h"
+#include "mux.h"
 //
 #include "vepoc.h"
 
@@ -590,6 +591,11 @@ int main(int argc, char* argv[]) {
     /* initialize h264 encoder */
     H264enc_init__(); 
     H264enc_new__();
+    
+    /* initialize muxer */
+    Mux_init("/tmp/tvin.mkv");
+    Mux_writeHeader((uint8_t*)0, 0);
+    
     usleep(300000);
     
     /* start stream */
@@ -663,6 +669,9 @@ close:
     
     /* free h264 encoder */
     H264enc_free__();
+    
+    /* free muxer */
+    Mux_close();
     
     DBG("MaxTime: %f, MinTime: %f", pThis->maxTimeForOneFrame, pThis->minTimeForOneFrame);
 	printf("TVD demo bye!\n");
@@ -910,6 +919,8 @@ static void Tvin2jpeg_processImage__ (const void *p, int picSize) {
             if (H264enc_encodePicture__()) {
                 write(pThis->ve.h264enc.file, pThis->ve.h264enc.pBytestreamBuffer, 
                       pThis->ve.h264enc.bytestreamLength);
+                Mux_writeData(pThis->ve.h264enc.pBytestreamBuffer, 
+                    pThis->ve.h264enc.bytestreamLength, pThis->ve.h264enc.frameNum ? 0 : 1);
             } else {
                 printf("ERROR: h264 encoding!\n");
             }

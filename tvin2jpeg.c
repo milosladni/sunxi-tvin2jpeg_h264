@@ -48,6 +48,7 @@
 #include <stdint.h>
 #include <pthread.h>                                                           /* pthread_mutex_t */
 #include <sys/epoll.h>
+#include <sys/prctl.h>
 //
 #include "sunxi_disp_ioctl.h"
 #include <sys/time.h>
@@ -57,6 +58,9 @@
 #include "mux.h"
 //
 #include "vepoc.h"
+#include "jpeg.h"
+
+#define DRAM_OFFSET (0x40000000)
 
 #define CAMERA_DEVICE       "/dev/video1"
 #define DISPLAY_DEVICE      "/dev/disp"
@@ -119,6 +123,7 @@ typedef struct ThreadTag {
     pthread_t       id;
     bool_t          running;
     bool_t          process;
+    bool_t          finished;
 } Thread_t;
 
 /* video buffers */
@@ -134,6 +139,8 @@ typedef struct SizeTag {
 } Size_t;
 
 typedef enum VeSubengTypeTag {
+    SUBENG_MPEG,
+    SUBENG_H264,
     SUBENG_ISP,
     SUBENG_AVCENC,
 } VeSubengType_t;
@@ -168,16 +175,29 @@ typedef struct CameraTag {
     unsigned int        n_buffers;                                 /* number of allocated buffers */
 } Camera_t;
 
-typedef struct DisplayTag {
-    int                 fd;                                      /* display driver fd (/dev/disp) */
+enum DysplayLayerTypeTag {
+    DL_RAW = 0,                                        /* display layer for raw frame from camera */
+    DL_JPEG,                                            /* display layer for jpeg decoded picture */
+    DL_H264,                                             /* display layer for decoded h264 stream */
+    DL_MAX
+};
+
+typedef struct DisplayLayerTag {
+    bool_t              initialized;                              /* display layer is initialized */
     unsigned int        layerId;                                               /* diplay layer id */
     __disp_layer_info_t layerPara;                                    /* display layer parameters */
-    __disp_video_fb_t   videoFb;                                     /* display video framebuffer */
+    uint32_t            lastId;                                                  /* last frame id */
+} DisplayLayer_t;
+
+typedef struct DisplayTag {
+    int                 fd;                                      /* display driver fd (/dev/disp) */
+    int                 fb_fd;
     int                 sel;                                                  /* which screen 0/1 */
-    __disp_pixel_fmt_t  format;                                           /* display pixel format *///DISP_FORMAT_YUV420
-    __disp_pixel_mod_t  mode;                                               /* display pixel mode *///DISP_MOD_NON_MB_UV_COMBINED
-    __disp_pixel_seq_t	seq;                                                 /* display pixel seq *///DISP_SEQ_UVUV yuv420
-    bool_t              initialized;                                    /* display is initialized */
+    DisplayLayer_t      layer[DL_MAX];      /* diaplay layers, raw camera, jpeg dec, h264 dec ... */
+    //__disp_video_fb_t   videoFb;                                   /* display video framebuffer */
+    //__disp_pixel_fmt_t  format;                                         /* display pixel format *///DISP_FORMAT_YUV420
+    //__disp_pixel_mod_t  mode;                                             /* display pixel mode *///DISP_MOD_NON_MB_UV_COMBINED
+    //__disp_pixel_seq_t	seq;                                             /* display pixel seq *///DISP_SEQ_UVUV yuv420
 } Display_t;
 
 typedef struct TurbojpegTag {   /* sw jpeg enc param */
@@ -195,6 +215,7 @@ typedef struct HwJpegTag {  /* hw jpeg enc param */
 typedef struct JpegEncTag { /* jpeg enc param */
     Type_t              type;                                         /* encode frame by sw or hw */
     int                 jpegEncQuality;                                /* encoder picture quality */
+    uint32_t            id;
     Turbojpeg_t         tj;                                                    /* turbojpeg param */
     HwJpeg_t            hwj;
 } JpegEnc_t;
@@ -234,7 +255,7 @@ typedef struct h264encRefPicTag {
 typedef struct H264encParamTag {
     bool_t          encode;
     int             file;
-        
+    
 	unsigned int    profileIdc;
     unsigned int    levelIdc;
     unsigned int    constraints;
@@ -260,19 +281,35 @@ typedef struct VeispTag {
     Scaler_t    scaler;                                                              /* ve scaler */
 } Veisp_t;
 
+typedef struct JpegDecTag {
+    bool_t          decode;
+    int             file;
+    uint32_t        id;
+    /* hw buffers */
+    uint8_t        *input_buffer;
+    uint8_t        *luma_buffer;
+	uint8_t        *chroma_buffer;
+    
+    double          maxTimeForOneFrame;
+    double          minTimeForOneFrame;
+} JpegDec_t;
+
 typedef struct VeTag {                                                            /* video engine */
-    void        *pRegs;                              /* pointer to virtual mapped cedar registers */
+    pthread_mutex_t mutex;                                   /* critical section for hw resources */
+    void           *pRegs;                           /* pointer to virtual mapped cedar registers */
     /* input buffers */
-	uint8_t    *pLumaSrc;                                                    /* input luma buffer */
-	uint8_t    *pChromaSrc;                                                /* input chroma buffer */
+	uint8_t        *pLumaSrc;                                                /* input luma buffer */
+	uint8_t        *pChromaSrc;                                            /* input chroma buffer */
     /* veisp */
-    Veisp_t     isp;
+    Veisp_t         isp;
     /* h264 encoder */
     H264enc_t    h264enc;                                                         /* h264 encoder */
+    JpegDec_t    jpegdec;
 } Ve_t;
 
 
 typedef struct ApplTag {
+    pthread_mutex_t     mutex;
     long signed int     frameCount;                                             /* frames to read */
     long unsigned int   compressCount;                                      /* frames to compress */
     long unsigned int   rawCount;                                           /* raw frames to save */
@@ -289,11 +326,13 @@ typedef struct ApplTag {
     //HW VE - Video Engine
     Ve_t                ve;                                                       /* video engine */
     //thread - critical section
-    Thread_t            thread;                                      /* thread for encoding frame */
+    Thread_t            threadEncoder;                               /* thread for encoding frame */
+    Thread_t            threadDecoder;                               /* thread for decoding frame */
     //other
     bool_t              run;
     double              maxTimeForOneFrame;
     double              minTimeForOneFrame;
+    
 } Appl_t;
 
 static Appl_t       l_appl;
@@ -301,17 +340,18 @@ static Appl_t      *pThis = &l_appl;
 
 /* forward declarations */
 //pthread
-static void CriticalSectionCreate__(void);
-static void CriticalSectionEnter__(void);
-static void CriticalSectionExit__(void);
-static void CriticalSectionDestroy__(void);
-static void ConditionVariable_create__(void);
-static void ConditionVariable_wait__(void);
-static void ConditionVariable_signal__(void);
-static void ConditionVariable_destroy__(void);
-static void Thread_create__(threadFunction_t pThreadFunction, void *pThreadParameter);
+static void CriticalSectionCreate__(pthread_mutex_t *mutex);
+static void CriticalSectionEnter__(pthread_mutex_t *mutex);
+static void CriticalSectionExit__(pthread_mutex_t *mutex);
+static void CriticalSectionDestroy__(pthread_mutex_t *mutex);
+static void ConditionVariable_create__(pthread_cond_t  *cond);
+static void ConditionVariable_wait__(pthread_cond_t  *cond, pthread_mutex_t *mutex);
+static void ConditionVariable_signal__(pthread_cond_t  *cond);
+static void ConditionVariable_destroy__(pthread_cond_t  *cond);
+static void Thread_create__(Thread_t *pThread, threadFunction_t pThreadFunction, void *pThreadParameter);
 static void Thread_destroy__(void);
-THREAD_FUNCTION_RETURN_TYPE THREAD_FUNCTION_ATTRIBUTE ThreadProcessFrame__(void *pArgument);
+THREAD_FUNCTION_RETURN_TYPE THREAD_FUNCTION_ATTRIBUTE ThreadEncodeFrame__(void *pArgument);
+THREAD_FUNCTION_RETURN_TYPE THREAD_FUNCTION_ATTRIBUTE ThreadDecodeFrame__(void *pArgument);
 //Tvin2jpeg
 static int Tvin2jpeg_readFrame__(void);
 static void Tvin2jpeg_processImage__(const void *p, int picSize);
@@ -327,12 +367,14 @@ static void Camera_streamOn__(void);
 static void Camera_streamOff__(void);
 static void Camera_queryFrame__(uint32_t bufIdx);
 //display
-static int Disp_init__(int width, int height);
-static void Disp_start__(void);
-static void Disp_stop__(void);
+static int Disp_init__(DisplayLayer_t *pLayer, __disp_pixel_fmt_t format, __disp_pixel_mod_t  mode, __disp_pixel_seq_t	seq, uint32_t srcWidth, uint32_t srcHeight, uint32_t outX, uint32_t outY, uint32_t outWidth, const int outHeight);
+static void Disp_start__(DisplayLayer_t *pLayer);
+static void Disp_stop__(DisplayLayer_t *pLayer);
 static int Disp_on__(void);
-static int Disp_exit__(void);
-static int Disp_set_addr__(int w,int h,int *addr);
+static int Disp_exit__(DisplayLayer_t *pLayer);
+static int Disp_set_addr__(DisplayLayer_t *pLayer, int w, int h, int *addr);
+static int Disp_newDecoder_frame__(DisplayLayer_t *pLayer, int w, int h, const uint32_t luma_buffer, 
+                                    const uint32_t chroma_buffer, const int id);
 //libturbojpeg
 static void Tj_init__(void);
 static void Tj_close__(void);
@@ -365,6 +407,13 @@ static void put_rbsp_trailing_bits__(void);
 static void put_seq_parameter_set__(void);
 static void put_pic_parameter_set__(void);
 static void put_slice_header__(void);
+//hw jpeg decoder
+static void JpegDec_init__(void);
+static void JpegDec_decode__(struct jpeg_t *jpeg);
+static void JpegDec_setFormat__(struct jpeg_t *jpeg);
+static void JpegDec_setSize__(struct jpeg_t *jpeg);
+static void JpegDec_setQuantizationTables__(struct jpeg_t *jpeg);
+static void JpegDec_setHuffmanTables__(struct jpeg_t *jpeg);
 //other
 static void yuv422YUYV_YUY2_2rgb__(char *pIn, char *pOut, unsigned long len);
 static void crop_nv12__(char *pSrc, char *pDst, uint32_t srcWidth, uint32_t srcHeight, uint32_t dstWidth, uint32_t dstHeight);
@@ -377,7 +426,8 @@ enum privateLongOptionsTag {
     OPT_YUVTORGB__,
     OPT_JPEGENCTYPE__,
     OPT_SCALE__,
-    OPT_H264ENC__
+    OPT_H264ENC__,
+    OPT_JPEG_DEC__
 };
 static const char short_options[] = "h:c:C:d:o:q:r:p:f";
 
@@ -397,7 +447,8 @@ long_options[] = {
         { "jpegEncType",    required_argument,  NULL,  OPT_JPEGENCTYPE__ },
         { "scale",          required_argument,  NULL,  OPT_SCALE__},
         { "testOption2",    required_argument,  &testopt2_flag, 1 },
-        { "h264enc",        no_argument,        NULL,  OPT_H264ENC__ },
+        { "h264Enc",        no_argument,        NULL,  OPT_H264ENC__ },
+        { "jpegDec",        no_argument,        NULL,  OPT_JPEG_DEC__ },
         { NULL, 0, NULL, 0 }
 };
 
@@ -427,6 +478,7 @@ static void usage__(FILE *fp, int argc, char **argv) {
      "                      | 1 -> ARBITRARY-SCALER-VGA  |\n"
      "                      | 2 -> ARBITRARY-SCALER_QVGA |\n"
      "     --h264Enc       Enable h264Encoder (Default: Disabled)\n"
+     "     --jpegDec       Enable jpeg decoder (Default: Disabled)\n"
      "\n",
      argv[0]+2, FW_VERSION, pThis->camera.deviceName);
 }
@@ -473,6 +525,10 @@ static void get_options__ (int argc, char **argv)
             }
             case OPT_H264ENC__: {
                 pThis->ve.h264enc.encode = TRUE;
+                break;
+            }
+            case OPT_JPEG_DEC__: {
+                pThis->ve.jpegdec.decode = TRUE;
                 break;
             }
             case 'h': {
@@ -574,12 +630,22 @@ int main(int argc, char* argv[]) {
     Camera_mapBuffers__();
     
     /* initialize thread */
-    CriticalSectionCreate__();
-    ConditionVariable_create__();
-    Thread_create__(ThreadProcessFrame__, pThis);
+    CriticalSectionCreate__(&pThis->mutex);                            /* global critical section */
+    CriticalSectionCreate__(&pThis->ve.mutex);             /* hardware resources critical section */
+    CriticalSectionCreate__(&pThis->threadEncoder.mutex);             /* encoder critical section */
+    ConditionVariable_create__(&pThis->threadEncoder.cond);              /* encoder cond variable */
+    CriticalSectionCreate__(&pThis->threadDecoder.mutex);             /* encoder critical section */
+    ConditionVariable_create__(&pThis->threadDecoder.cond);              /* encoder cond variable */
+    Thread_create__(&pThis->threadEncoder, ThreadEncodeFrame__, pThis);   /* start encoder thread */
+    Thread_create__(&pThis->threadDecoder, ThreadDecodeFrame__, pThis);   /* start decoder thread */
+    DBG("Create: %p, %p, %p, %p\n", &pThis->mutex, &pThis->ve.mutex, &pThis->threadEncoder.mutex, 
+                                  &pThis->threadDecoder.mutex);
 
     /* initialize jpegturbo compressor */
     Tj_init__();
+    
+    /* initialize jpeg decoder */
+    JpegDec_init__();
     
     /* initialize VE - Video Engine */
     Ve_init__();
@@ -637,19 +703,56 @@ int main(int argc, char* argv[]) {
                     / 1000000.0;
     printf("\nTime for %d frames: %f\n", (int)nFrames, timediff);
     
-    /* destroy thread */
-    while(1) {                                           /* wait until process image is completed */
-        CriticalSectionEnter__();
-        if (pThis->thread.process == FALSE) {
-            CriticalSectionExit__();
+    /* destroy all threads */
+    {
+    /* destroy encoder thread */
+    while(1) {                                    /* wait until encode process image is completed */
+        CriticalSectionEnter__(&pThis->mutex);
+        if (pThis->threadEncoder.process == FALSE) {
+            CriticalSectionExit__(&pThis->mutex);
             break;
         }
-        CriticalSectionExit__();
+        CriticalSectionExit__(&pThis->mutex);
+        usleep(5000);
+    }
+    /* destroy decoder thread */
+    while(1) {                                    /* wait until decode process image is completed */
+        CriticalSectionEnter__(&pThis->mutex);
+        if (pThis->threadDecoder.process == FALSE) {
+            CriticalSectionExit__(&pThis->mutex);
+            break;
+        }
+        CriticalSectionExit__(&pThis->mutex);
         usleep(5000);
     }
     Thread_destroy__();
-    ConditionVariable_destroy__();
-    CriticalSectionDestroy__();
+    while(1) {                                            /* wait until encode thread is finished */
+        CriticalSectionEnter__(&pThis->mutex);
+        if (pThis->threadEncoder.finished == TRUE) {
+            CriticalSectionExit__(&pThis->mutex);
+            break;
+        }
+        ConditionVariable_signal__(&pThis->threadEncoder.cond);
+        CriticalSectionExit__(&pThis->mutex);
+        usleep(5000);
+    }
+    ConditionVariable_destroy__(&pThis->threadEncoder.cond);     /* destroy encoder condition var */
+    CriticalSectionDestroy__(&pThis->threadEncoder.mutex);               /* destroy encoder mutex */
+    while(1) {                                            /* wait until decode thread is finished */
+        CriticalSectionEnter__(&pThis->mutex);
+        if (pThis->threadDecoder.finished == TRUE) {
+            CriticalSectionExit__(&pThis->mutex);
+            break;
+        }
+        ConditionVariable_signal__(&pThis->threadDecoder.cond);
+        CriticalSectionExit__(&pThis->mutex);
+        usleep(5000);
+    }
+    //ConditionVariable_destroy__(&pThis->threadDecoder.cond);     /* destroy decoder condition var */
+    CriticalSectionDestroy__(&pThis->threadDecoder.mutex);               /* destroy decoder mutex */
+    CriticalSectionDestroy__(&pThis->ve.mutex);                               /* destroy hw mutex */
+    CriticalSectionDestroy__(&pThis->mutex);                              /* destroy global mutex */
+    }
     
     /* uninitialize jpeg turbo compressor */
     Tj_close__();
@@ -664,8 +767,10 @@ close:
     Camera_unmapBuffers__();
     Camera_close__();
 	/* close display */
-    Disp_stop__();                                                          /* stop video display */
-	Disp_exit__();	                                                       /* close display layer */
+    Disp_stop__(&pThis->disp.layer[DL_RAW]);                         /* stop camera video display */
+    Disp_stop__(&pThis->disp.layer[DL_JPEG]);                  /* stop jpeg decoder video display */
+    Disp_exit__(&pThis->disp.layer[DL_RAW]);	                    /* close camera display layer */
+	Disp_exit__(&pThis->disp.layer[DL_JPEG]);	              /* close jpeg decoder display layer */
     
     /* free h264 encoder */
     H264enc_free__();
@@ -673,95 +778,111 @@ close:
     /* free muxer */
     Mux_close();
     
-    DBG("MaxTime: %f, MinTime: %f", pThis->maxTimeForOneFrame, pThis->minTimeForOneFrame);
+    DBG("Encoder MaxTime: %f, MinTime: %f", pThis->maxTimeForOneFrame, pThis->minTimeForOneFrame);
+    
+    DBG("Jpeg Decoder MaxTime: %f, MinTime: %f", pThis->ve.jpegdec.maxTimeForOneFrame, 
+                                                 pThis->ve.jpegdec.minTimeForOneFrame);
 	printf("TVD demo bye!\n");
 	return 0;						
 }
 
 /* static functions definitions */
 //pthread
-static void CriticalSectionCreate__ (void) {
+static void CriticalSectionCreate__ (pthread_mutex_t *mutex) {
     
     int retVal;
 
-    retVal = pthread_mutex_init(&pThis->thread.mutex, NULL);       /* dynamically mutexinitmethod */
+    retVal = pthread_mutex_init(mutex, NULL);                      /* dynamically mutexinitmethod */
 
     assert(retVal == 0);                         /* pthread_mutex_init() must return with success */
 }
 
-static void CriticalSectionEnter__ (void) {
+static void CriticalSectionEnter__ (pthread_mutex_t *mutex) {
 
     int retVal;
 
-    retVal = pthread_mutex_lock(&pThis->thread.mutex);
+    retVal = pthread_mutex_lock(mutex);
 
+    //if (retVal != 0) {
+        //DBGF("RetVal: %p, %d", mutex, retVal);
+    //} else {
+        //printf("Enter: %p\n", mutex);
+    //}
     assert(retVal == 0);                         /* pthread_mutex_lock() must return with success */
 }
 
-static void CriticalSectionExit__ (void) {
+static void CriticalSectionExit__ (pthread_mutex_t *mutex) {
 
     int retVal;
 
-    retVal = pthread_mutex_unlock(&pThis->thread.mutex);
+    retVal = pthread_mutex_unlock(mutex);
 
+    //if (retVal != 0) {
+        //DBGF("RetVal: %p, %d", mutex, retVal);
+    //} else {
+        //printf("Exit: %p\n", mutex);
+    //}
     assert(retVal == 0);                       /* pthread_mutex_unlock() must return with success */
 }
 
-static void CriticalSectionDestroy__ (void) {
+static void CriticalSectionDestroy__ (pthread_mutex_t *mutex) {
 
     int retVal;
 
-    retVal = pthread_mutex_destroy(&pThis->thread.mutex);
+    retVal = pthread_mutex_destroy(mutex);
 
-    if (retVal != 0) {
-        DBGF("RetVal: %d", retVal);//Why is this happening?? Return 16 EBUSY //TODO!!!
-    }
-    //assert(retVal == 0);                    /* pthread_mutex_destroy() must return with success */
+    //if (retVal != 0) {
+        //DBGF("RetVal: %p, %d", mutex, retVal);//Why is this happening?? Return 16 EBUSY //TODO!!!
+    //} else {
+        //DBGF("%p", mutex);
+    //}
+    assert(retVal == 0);                    /* pthread_mutex_destroy() must return with success */
 }
 
-static void ConditionVariable_create__ (void) {
+static void ConditionVariable_create__ (pthread_cond_t  *cond) {
 
     int retVal;
     
-    retVal = pthread_cond_init(&pThis->thread.cond, NULL);          /* dynamically condinitmethod */
+    retVal = pthread_cond_init(cond, NULL);          /* dynamically condinitmethod */
 
     assert(retVal == 0);                          /* pthread_cond_init() must return with success */
 }
 
-static void ConditionVariable_wait__ (void) {
+static void ConditionVariable_wait__ (pthread_cond_t  *cond, pthread_mutex_t *mutex) {
 
     int retVal;
 
-    retVal = pthread_cond_wait(&pThis->thread.cond, &pThis->thread.mutex);
+    retVal = pthread_cond_wait(cond, mutex);
 
     assert(retVal == 0);                          /* pthread_cond_wait() must return with success */
 }
 
-static void ConditionVariable_signal__ (void) {
+static void ConditionVariable_signal__ (pthread_cond_t  *cond) {
 
     int retVal;
     
-    retVal = pthread_cond_signal(&pThis->thread.cond);
+    retVal = pthread_cond_signal(cond);
 
     assert(retVal == 0);                        /* pthread_cond_signal() must return with success */
 }
 
-static void ConditionVariable_destroy__ (void) {
+static void ConditionVariable_destroy__ (pthread_cond_t  *cond) {
 
     int retVal;
 
-    retVal = pthread_cond_destroy(&pThis->thread.cond);  /* free the specified condition variable */
+    retVal = pthread_cond_destroy(&pThis->threadEncoder.cond);  /* free the specified condition variable */
 
     assert(retVal == 0);                       /* pthread_cond_destroy() must return with success */
 }
 
-static void Thread_create__ (threadFunction_t pThreadFunction, void *pThreadParameter) {
+static void Thread_create__ (Thread_t *pThread, threadFunction_t pThreadFunction, void *pThreadParameter) {
 
     int retVal;
     
-    pThis->thread.running = TRUE;
-    pThis->thread.process = FALSE;
-    retVal = pthread_create(&pThis->thread.id, NULL, pThreadFunction, pThreadParameter);
+    pThread->running = TRUE;
+    pThread->process = FALSE;
+    pThread->finished = FALSE;
+    retVal = pthread_create(&pThread->id, NULL, pThreadFunction, pThreadParameter);
 
     assert(retVal == 0);                             /* pthread_create() must return with success */
 }
@@ -770,34 +891,50 @@ static void Thread_destroy__ (void) {
 
     //int retVal;
     
-    CriticalSectionEnter__();
-    pThis->thread.running = FALSE;
-    CriticalSectionExit__();
-    ConditionVariable_signal__();
-    //retVal = pthread_join(pThis->thread.id, NULL);
-    
-    //assert(retVal == 0);                               /* pthread_join() must return with success */
+    /* stop encoder thread */
+    CriticalSectionEnter__(&pThis->mutex);
+    pThis->threadEncoder.running = FALSE;
+    CriticalSectionExit__(&pThis->mutex);
+    ConditionVariable_signal__(&pThis->threadEncoder.cond);
+    //retVal = pthread_join(pThis->threadEncoder.id, NULL);
+    //assert(retVal == 0);                             /* pthread_join() must return with success */
+        
+    /* stop decoder thread */
+    CriticalSectionEnter__(&pThis->mutex);
+    pThis->threadDecoder.running = FALSE;
+    CriticalSectionExit__(&pThis->mutex);
+    ConditionVariable_signal__(&pThis->threadDecoder.cond);
+    //retVal = pthread_join(pThis->threadDecoder.id, NULL);
+    //assert(retVal == 0);                             /* pthread_join() must return with success */
 }
 
-THREAD_FUNCTION_RETURN_TYPE THREAD_FUNCTION_ATTRIBUTE ThreadProcessFrame__ (void *pArgument) {
+THREAD_FUNCTION_RETURN_TYPE THREAD_FUNCTION_ATTRIBUTE ThreadEncodeFrame__ (void *pArgument) {
 
+    Appl_t     *pThis;
     const void *pFrame;
     int         frameSize;
     struct      timeval tvStart, tvEnd;
     double      timediff;
-    UNUSED_ARGUMENT(pArgument);
-
+        /* global and loval variable pThis have same name but local variable will take preference */
+    pThis = (Appl_t*)pArgument;
+    
+    /* set thread name */
+    //prctl(PR_SET_NAME, "EncodeThread", 0, 0, 0);
+    
     while (1) {
-        CriticalSectionEnter__();
-        ConditionVariable_wait__();
-        if (pThis->thread.running == FALSE) {
-            CriticalSectionExit__();
+        CriticalSectionEnter__(&pThis->threadEncoder.mutex);
+        ConditionVariable_wait__(&pThis->threadEncoder.cond, &pThis->threadEncoder.mutex);
+        CriticalSectionExit__(&pThis->threadEncoder.mutex);
+        CriticalSectionEnter__(&pThis->mutex);
+        if (pThis->threadEncoder.running == FALSE) {
+            CriticalSectionExit__(&pThis->mutex);                             /* stop this thread */
             break;
         }
-        pFrame = pThis->frame.pFrame;
+        pFrame = pThis->frame.pFrame;                                   /* take user data pointer */
         frameSize = pThis->frame.frameSize;
-        pThis->thread.process = TRUE;
-        CriticalSectionExit__();
+        pThis->threadEncoder.process = TRUE;
+        CriticalSectionExit__(&pThis->mutex);
+        
         gettimeofday(&tvStart, 0);
         Tvin2jpeg_processImage__(pFrame, frameSize);
         gettimeofday(&tvEnd, 0);
@@ -810,11 +947,171 @@ THREAD_FUNCTION_RETURN_TYPE THREAD_FUNCTION_ATTRIBUTE ThreadProcessFrame__ (void
         if (timediff < pThis->minTimeForOneFrame) {
             pThis->minTimeForOneFrame = timediff;
         }
-        CriticalSectionEnter__();
-        pThis->thread.process = FALSE;
-        CriticalSectionExit__();
+        
+        CriticalSectionEnter__(&pThis->mutex);
+        pThis->threadEncoder.process = FALSE;                                   /* thread is idle */
+        CriticalSectionExit__(&pThis->mutex);
     }
     
+    CriticalSectionEnter__(&pThis->mutex);
+    pThis->threadEncoder.finished = TRUE;                                          /* thread died */
+    CriticalSectionExit__(&pThis->mutex);
+    DBGF("Finished...");
+    return THREAD_FUNCTION_RETURN_VALUE;
+}
+
+THREAD_FUNCTION_RETURN_TYPE THREAD_FUNCTION_ATTRIBUTE ThreadDecodeFrame__ (void *pArgument) {
+
+    Appl_t     *pThis;
+    uint32_t    id;
+    int         in;
+    struct stat s;
+    uint8_t    *data;
+    struct      timeval tvStart, tvEnd;
+    double      timediff;
+    char        fname[2048];
+        /* global and loval variable pThis have same name but local variable will take preference */
+    pThis = (Appl_t*)pArgument;
+    
+    /* set thread name */
+    //prctl(PR_SET_NAME, "DecodeThread", 0, 0, 0);
+    
+    /* wait for start decoding signal */
+    CriticalSectionEnter__(&pThis->threadDecoder.mutex);
+        ConditionVariable_wait__(&pThis->threadDecoder.cond, &pThis->threadDecoder.mutex);
+    CriticalSectionExit__(&pThis->threadDecoder.mutex);
+    
+    while (1) {
+        CriticalSectionEnter__(&pThis->mutex);
+        id = pThis->jpegEnc.id;
+        CriticalSectionExit__(&pThis->mutex);
+        
+        if (pThis->ve.jpegdec.id >= id) {                      /* wait for new frame from encoder */
+            CriticalSectionEnter__(&pThis->threadDecoder.mutex);
+            ConditionVariable_wait__(&pThis->threadDecoder.cond, &pThis->threadDecoder.mutex);
+            CriticalSectionExit__(&pThis->threadDecoder.mutex);
+        }
+        CriticalSectionEnter__(&pThis->mutex);
+        if (pThis->threadDecoder.running == FALSE) {
+            CriticalSectionExit__(&pThis->mutex);                             /* stop this thread */
+            break;
+        }
+        pThis->threadDecoder.process = TRUE;
+        CriticalSectionExit__(&pThis->mutex);
+        
+        /* prepare file name for decode */
+        /* open file */
+        snprintf(fname, sizeof(fname), "/tmp/testImage_%03d.jpg", pThis->ve.jpegdec.id);
+        if ((in = open(fname, O_RDONLY)) == -1) {
+            DBG("Error open: %s", fname);
+            exit(EXIT_FAILURE);
+        }
+        if (fstat(in, &s) < 0) {
+            DBG("Error stat %s", fname);
+            exit(EXIT_FAILURE);
+        }
+        if (s.st_size == 0) {
+            DBG("Error %s empty", fname);
+            exit(EXIT_FAILURE);
+        }
+        /* map file */
+        if ((data = mmap(NULL, s.st_size, PROT_READ, MAP_SHARED, in, 0)) == MAP_FAILED) {
+            DBG("Error mmap %s", fname);
+            exit(EXIT_FAILURE);
+        }
+        gettimeofday(&tvStart, 0);
+        /* decode jpeg */
+        {
+            struct jpeg_t jpeg ;
+            
+            memset(&jpeg, 0, sizeof(jpeg));
+            /* parse jpeg picture */
+            if (!parse_jpeg(&jpeg, data, s.st_size)) {
+                DBG("Can't parse JPEG");
+                munmap(data, s.st_size);
+                close(in);
+                continue;
+            }
+            /* dump jpeg */
+            //fflush(stdout);
+            //dump_jpeg(&jpeg);
+            /* decode picture */
+            JpegDec_decode__(&jpeg);
+            
+            /* show frame on display */
+            if (pThis->disp.layer[DL_JPEG].initialized == FALSE) {
+                                                        /*initialize display and show first frame */
+                uint8_t             fmt;
+                __disp_pixel_fmt_t  format;
+                
+                fmt = (jpeg.comp[0].samp_h << 4) | jpeg.comp[0].samp_v;
+                switch (fmt) {
+                    case 0x11:
+                    case 0x21: {
+                        format = DISP_FORMAT_YUV422;
+                        break;
+                    }
+                    case 0x12:
+                    case 0x22:
+                    default: {
+                        format = DISP_FORMAT_YUV420;
+                        break;
+                    }
+                }
+                
+                if (Disp_init__(&pThis->disp.layer[DL_JPEG], format, 
+                    DISP_MOD_MB_UV_COMBINED, DISP_SEQ_UVUV, jpeg.width, 
+                    jpeg.height, DISP_DL_JPEG_SCN_POS_X, DISP_DL_JPEG_SCN_POS_Y, 
+                    DISP_DL_JPEG_SCN_WIDTH, DISP_DL_JPEG_SCN_HEIGHT) == 0) {
+                    Disp_start__(&pThis->disp.layer[DL_JPEG]);
+                    Disp_on__();
+                    pThis->disp.layer[DL_JPEG].initialized = TRUE;
+                    /* show first frame */
+                    Disp_newDecoder_frame__(&pThis->disp.layer[DL_JPEG], jpeg.width, jpeg.height,
+                    ve_virt2phys(pThis->ve.jpegdec.luma_buffer), 
+                    ve_virt2phys(pThis->ve.jpegdec.chroma_buffer),
+                    pThis->ve.jpegdec.id);
+                    
+                }
+
+            } else {                                                           /* show next frame */
+                    Disp_newDecoder_frame__(&pThis->disp.layer[DL_JPEG], jpeg.width, jpeg.height,
+                    ve_virt2phys(pThis->ve.jpegdec.luma_buffer), 
+                    ve_virt2phys(pThis->ve.jpegdec.chroma_buffer),
+                    pThis->ve.jpegdec.id);
+            }
+            
+            fflush(stdout);
+            /* close input file */
+            munmap(data, s.st_size);
+            close(in);
+        }
+        gettimeofday(&tvEnd, 0);
+        timediff = (((tvEnd.tv_sec - tvStart.tv_sec) * 1000000.0) +
+                     (tvEnd.tv_usec - tvStart.tv_usec)) / 1000000.0;
+        //printf("\nTime for 1 frame: %f\n", timediff);
+        if (timediff > pThis->ve.jpegdec.maxTimeForOneFrame) {
+            pThis->ve.jpegdec.maxTimeForOneFrame = timediff;
+        }
+        if (timediff < pThis->ve.jpegdec.minTimeForOneFrame) {
+            pThis->ve.jpegdec.minTimeForOneFrame = timediff;
+        }
+        
+        /* decode h264 */
+        //TODO
+        
+        
+        DBG("Decode.. %d", pThis->ve.jpegdec.id);
+        pThis->ve.jpegdec.id++;                                          /* increment frame index */
+        CriticalSectionEnter__(&pThis->mutex);
+        pThis->threadDecoder.process = FALSE;                                   /* thread is idle */
+        CriticalSectionExit__(&pThis->mutex);
+    }
+    
+    CriticalSectionEnter__(&pThis->mutex);
+    pThis->threadDecoder.finished = TRUE;                                          /* thread died */
+    CriticalSectionExit__(&pThis->mutex);
+    DBGF("Finished...");
     return THREAD_FUNCTION_RETURN_VALUE;
 }
 
@@ -856,25 +1153,34 @@ static int Tvin2jpeg_readFrame__ (void) {
     
     /* process image */
     //Tvin2jpeg_processImage__(pThis->camera.buffers[buf.index].start, buf.bytesused, buf.index);
-    CriticalSectionEnter__();
+    CriticalSectionEnter__(&pThis->mutex);
     pThis->frame.pFrame = pThis->camera.buffers[buf.index].start;
     pThis->frame.frameSize = buf.bytesused;
-    CriticalSectionExit__();
-    ConditionVariable_signal__();                           /* triger encoding in encoding thread */
+    CriticalSectionExit__(&pThis->mutex);
+    ConditionVariable_signal__(&pThis->threadEncoder.cond); /* triger encoding in encoding thread */
     
     /* show frame to display */
     if (pThis->preview == TRUE) {
         /* initialize display */
-        if (pThis->disp.initialized == FALSE) {
-            pThis->disp.format = DISP_FORMAT_YUV420; //DISP_FORMAT_YUV420 //DISP_FORMAT_YUV422
-            pThis->disp.seq=DISP_SEQ_UVUV;
-            if (Disp_init__(pThis->camera.size.width, pThis->camera.size.height) == 0) {
-                Disp_start__();
+        if (pThis->disp.layer[DL_RAW].initialized == FALSE) {
+            //pThis->disp.format = DISP_FORMAT_YUV420; //DISP_FORMAT_YUV420 //DISP_FORMAT_YUV422
+            //pThis->disp.seq=DISP_SEQ_UVUV;
+            if (Disp_init__(&pThis->disp.layer[DL_RAW], DISP_FORMAT_YUV420, 
+                DISP_MOD_NON_MB_UV_COMBINED, DISP_SEQ_UVUV, pThis->camera.size.width, 
+                pThis->camera.size.height, DISP_DL_RAW_SCN_POS_X, DISP_DL_RAW_SCN_POS_Y, 
+                DISP_DL_RAW_SCN_WIDTH, DISP_DL_RAW_SCN_HEIGHT) == 0) {
+                Disp_start__(&pThis->disp.layer[DL_RAW]);
                 Disp_on__();
-                pThis->disp.initialized = TRUE;
+                pThis->disp.layer[DL_RAW].initialized = TRUE;
+                Disp_set_addr__(&pThis->disp.layer[DL_RAW], pThis->camera.size.width, 
+                                 pThis->camera.size.height, (int *)&buf.m.offset);
             }
+        } else {
+            Disp_set_addr__(&pThis->disp.layer[DL_RAW], pThis->camera.size.width, 
+                             pThis->camera.size.height, (int *)&buf.m.offset);
         }
-        Disp_set_addr__(pThis->camera.size.width, pThis->camera.size.height, (int *)&buf.m.offset);
+        DBG("Disp: buffIndex_%d: off:0x%X->%p:%p", buf.index, buf.m.offset, &buf.m.offset, &buf.m.userptr);
+        
     }
 	
     /* query new frame for this buffer */
@@ -884,9 +1190,9 @@ static int Tvin2jpeg_readFrame__ (void) {
 
 static void Tvin2jpeg_processImage__ (const void *p, int picSize) {
     
+    static int      id = 0;
     FILE           *pFile;
     char            fname[100];
-    static int      id = 0;
     char           *pFrame = (char*)p;
     char           *pFrameFromFile = NULL;
     uint32_t        frameSize = (uint32_t)picSize;
@@ -924,6 +1230,11 @@ static void Tvin2jpeg_processImage__ (const void *p, int picSize) {
             } else {
                 printf("ERROR: h264 encoding!\n");
             }
+        }
+        
+        /* trigger decoding in decoder thread */
+        if (pThis->ve.jpegdec.decode == TRUE) {
+            ConditionVariable_signal__(&pThis->threadDecoder.cond);
         }
         
         if (pThis->readFile == TRUE) {
@@ -1002,7 +1313,11 @@ static void Tvin2jpeg_initVars__ (void) {
     pThis->camera.n_buffers = 0;
     CLEAR(pThis->camera.buffers);
     //display
-    pThis->disp.initialized = FALSE;
+    pThis->disp.layer[DL_RAW].initialized = FALSE;
+    pThis->disp.layer[DL_JPEG].initialized = FALSE;
+    pThis->disp.layer[DL_H264].initialized = FALSE;
+    pThis->disp.fd = -1;
+    pThis->disp.fb_fd = -1;
     pThis->frameCount = -1;
     pThis->compressCount = 0;
     pThis->rawCount = 0;
@@ -1026,6 +1341,8 @@ static void Tvin2jpeg_initVars__ (void) {
     pThis->run = TRUE;
     pThis->maxTimeForOneFrame = 0;
     pThis->minTimeForOneFrame = 100.00;
+    pThis->ve.jpegdec.maxTimeForOneFrame = 0;
+    pThis->ve.jpegdec.minTimeForOneFrame = 100.00;
 }
 
 //camera
@@ -1096,7 +1413,7 @@ static void Camera_init__ (void) {
     pThis->camera.bytesperline = fmt.fmt.pix.bytesperline;
     pThis->camera.rawSize = fmt.fmt.pix.sizeimage;
     
-    pThis->disp.mode=fmt_priv.fmt.raw_data[2]?DISP_MOD_MB_UV_COMBINED:DISP_MOD_NON_MB_UV_COMBINED;//DISP_MOD_NON_MB_UV_COMBINED DISP_MOD_MB_UV_COMBINED
+    //pThis->disp.mode=fmt_priv.fmt.raw_data[2]?DISP_MOD_MB_UV_COMBINED:DISP_MOD_NON_MB_UV_COMBINED;//DISP_MOD_NON_MB_UV_COMBINED DISP_MOD_MB_UV_COMBINED
 	//pThis->camera.size.width = fmt_priv.fmt.raw_data[8]*(fmt_priv.fmt.raw_data[2]?704:720);//width
 	//pThis->camera.size.height = fmt_priv.fmt.raw_data[9]*(fmt_priv.fmt.raw_data[1]?576:480);//height
 	printf("pThis->camera.size.width=%d\n", pThis->camera.size.width);
@@ -1184,8 +1501,8 @@ static void Camera_mapBuffers__ (void) {
                                          PROT_READ | PROT_WRITE /* required */,
                                          MAP_SHARED /* recommended */,
                                          pThis->camera.fd, buf.m.offset);
-        printf("MMAP: %p OFF: %p\n", pThis->camera.buffers[pThis->camera.n_buffers].start, 
-                                     (void *)buf.m.offset);
+        printf("MMAP %d: %p OFF: %p\n", pThis->camera.n_buffers, 
+                    pThis->camera.buffers[pThis->camera.n_buffers].start, (void *)buf.m.offset);
 
         if (MAP_FAILED == pThis->camera.buffers[pThis->camera.n_buffers].start) {
             printf("mmap failed\n");
@@ -1261,98 +1578,110 @@ static void Camera_queryFrame__ (uint32_t bufIdx) {
 }
 
 //Display
-static int Disp_init__ (int width, int height) {
+static int Disp_init__(DisplayLayer_t *pLayer, __disp_pixel_fmt_t format, __disp_pixel_mod_t mode, 
+                       __disp_pixel_seq_t seq, uint32_t srcWidth, uint32_t srcHeight, 
+                       uint32_t outX, uint32_t outY, uint32_t outWidth, const int outHeight) {
     
     __u32 arg[4];
     
     pThis->disp.sel = 0;                                                      /* which screen 0/1 */
-	if((pThis->disp.fd = open(DISPLAY_DEVICE, O_RDWR)) == -1) {            /* open display device */
-		DBG("Display %s open fail.", DISPLAY_DEVICE);
-		return -1;
-	}
-
+    /* open display if it is not already opened */
+    if (pThis->disp.fd < 0) {
+    	if((pThis->disp.fd = open(DISPLAY_DEVICE, O_RDWR)) == -1) {        /* open display device */
+            DBG("Display %s open fail.", DISPLAY_DEVICE);
+            return -1;
+        }
+    }
+    
     /* request layer *///layer0
-    arg[0] = 0;
-    arg[1] = DISP_LAYER_WORK_MODE_SCALER;
-    pThis->disp.layerId = ioctl(pThis->disp.fd, DISP_CMD_LAYER_REQUEST, (void*)arg);
-    if(pThis->disp.layerId == 0) {
+    arg[0] = 0; //sel
+    arg[1] = DISP_LAYER_WORK_MODE_SCALER;   //mode
+    pLayer->layerId = ioctl(pThis->disp.fd, DISP_CMD_LAYER_REQUEST, (void*)arg);
+    if(pLayer->layerId == 0) {
         DBG("request layer0 fail");
         close(pThis->disp.fd);
+        pThis->disp.fd = -1;
         return -1;
+    } else {
+        DBG("Display: get layer id: %d", pLayer->layerId);
     }
 
-    pThis->disp.layerPara.mode = DISP_LAYER_WORK_MODE_SCALER;
-    pThis->disp.layerPara.pipe = 0; 
-    pThis->disp.layerPara.fb.addr[0]       = 0;//your Y address,modify this 
-    pThis->disp.layerPara.fb.addr[1]       = 0; //your C address,modify this 
-    pThis->disp.layerPara.fb.addr[2]       = 0; 
-    pThis->disp.layerPara.fb.size.width    = width;
-    pThis->disp.layerPara.fb.size.height   = height;
-    pThis->disp.layerPara.fb.mode          = pThis->disp.mode;///DISP_MOD_INTERLEAVED;//DISP_MOD_NON_MB_PLANAR;//DISP_MOD_NON_MB_UV_COMBINED;
-    pThis->disp.layerPara.fb.format        = pThis->disp.format;//DISP_FORMAT_YUV420;//DISP_FORMAT_YUV422;//DISP_FORMAT_YUV420;
-    pThis->disp.layerPara.fb.br_swap       = 0;
-    pThis->disp.layerPara.fb.seq           = pThis->disp.seq;//DISP_SEQ_UVUV;//DISP_SEQ_YUYV;//DISP_SEQ_YVYU;//DISP_SEQ_UYVY;//DISP_SEQ_VYUY//DISP_SEQ_UVUV
-    pThis->disp.layerPara.ck_enable        = 0;
-    pThis->disp.layerPara.alpha_en         = 1; 
-    pThis->disp.layerPara.alpha_val        = 0xff;
-    pThis->disp.layerPara.src_win.x        = 0+2;
-    pThis->disp.layerPara.src_win.y        = 0+5;
-    pThis->disp.layerPara.src_win.width    = width-2;
-    pThis->disp.layerPara.src_win.height   = height-5;
-    pThis->disp.layerPara.scn_win.x        = DISP_SCN_POS_X;
-    pThis->disp.layerPara.scn_win.y        = DISP_SCN_POS_Y;
-    pThis->disp.layerPara.scn_win.width    = DISP_SCN_WIDTH;
-    pThis->disp.layerPara.scn_win.height   = DISP_SCN_HEIGHT;
+    memset(&pLayer->layerPara, 0, sizeof(pLayer->layerPara));
+    pLayer->layerPara.pipe = 1;
+    pLayer->layerPara.mode = DISP_LAYER_WORK_MODE_SCALER;
+    //pLayer->layerPara.pipe = 0; 
+    pLayer->layerPara.fb.addr[0]       = 0;//your Y address,modify this 
+    pLayer->layerPara.fb.addr[1]       = 0; //your C address,modify this 
+    pLayer->layerPara.fb.addr[2]       = 0; 
+    pLayer->layerPara.fb.size.width    = srcWidth;
+    pLayer->layerPara.fb.size.height   = srcHeight;
+    pLayer->layerPara.fb.mode          = mode;///DISP_MOD_INTERLEAVED;//DISP_MOD_NON_MB_PLANAR;//DISP_MOD_NON_MB_UV_COMBINED;
+    pLayer->layerPara.fb.format        = format;//DISP_FORMAT_YUV420;//DISP_FORMAT_YUV422;//DISP_FORMAT_YUV420;
+    pLayer->layerPara.fb.br_swap       = 0;
+    pLayer->layerPara.fb.seq           = seq;//DISP_SEQ_UVUV;//DISP_SEQ_YUYV;//DISP_SEQ_YVYU;//DISP_SEQ_UYVY;//DISP_SEQ_VYUY//DISP_SEQ_UVUV
+    pLayer->layerPara.fb.cs_mode       = DISP_BT601; //DISP_YCC //DISP_BT601
+    pLayer->layerPara.ck_enable        = 0;
+    pLayer->layerPara.alpha_en         = 1; 
+    pLayer->layerPara.alpha_val        = 0xff;
+    pLayer->layerPara.src_win.x        = 0;
+    pLayer->layerPara.src_win.y        = 0;
+    pLayer->layerPara.src_win.width    = srcWidth;
+    pLayer->layerPara.src_win.height   = srcHeight;
+    pLayer->layerPara.scn_win.x        = outX;
+    pLayer->layerPara.scn_win.y        = outY;
+    pLayer->layerPara.scn_win.width    = outWidth;
+    pLayer->layerPara.scn_win.height   = outHeight;
     
 	arg[0] = pThis->disp.sel;
-    arg[1] = pThis->disp.layerId;
-    arg[2] = (__u32)&pThis->disp.layerPara;
+    arg[1] = pLayer->layerId;
+    arg[2] = (__u32)&pLayer->layerPara;
     ioctl(pThis->disp.fd, DISP_CMD_LAYER_SET_PARA, (void*)arg);
 #if 0
     arg[0] = pThis->disp.sel;
-    arg[1] = pThis->disp.layerId;
+    arg[1] = pLayer->layerId;
     ioctl(pThis->disp.fd, DISP_CMD_LAYER_TOP, (void*)arg);
 #endif
     arg[0] = pThis->disp.sel;
-    arg[1] = pThis->disp.layerId;
+    arg[1] = pLayer->layerId;
     ioctl(pThis->disp.fd, DISP_CMD_LAYER_OPEN, (void*)arg);
 
 #if 1
-	int fb_fd;
-	unsigned long fb_layer;
-	//void *addr = NULL;
-	fb_fd = open("/dev/fb0", O_RDWR);
-	if (ioctl(fb_fd, FBIOGET_LAYER_HDL_0, &fb_layer) == -1) {
-		DBG("get fb layer handel");	
-	}
-	close(fb_fd);
-	arg[0] = 0;
-	arg[1] = fb_layer;
-	ioctl(pThis->disp.fd, DISP_CMD_LAYER_BOTTOM, (void *)arg);
+    if (pThis->disp.fb_fd < 0) {
+        unsigned long fb_layer;
+        //void *addr = NULL;
+        pThis->disp.fb_fd = open("/dev/fb0", O_RDWR);
+        if (ioctl(pThis->disp.fb_fd, FBIOGET_LAYER_HDL_0, &fb_layer) == -1) {
+            DBG("get fb layer handel");	
+        }
+        close(pThis->disp.fb_fd);
+        arg[0] = 0;
+        arg[1] = fb_layer;
+        ioctl(pThis->disp.fd, DISP_CMD_LAYER_BOTTOM, (void *)arg);
+    }
 #endif
 	return 0;
 }
 
-static void Disp_start__ (void) {
+static void Disp_start__ (DisplayLayer_t *pLayer) {
     
     __u32 arg[4];
     
     arg[0] = pThis->disp.sel;
     arg[1] = (__u32)6291462;
-    arg[2] = (__u32)&(pThis->disp.layerPara.scn_win);
+    arg[2] = (__u32)&(pLayer->layerPara.scn_win);
     ioctl(pThis->disp.fd, DISP_CMD_LAYER_SET_SCN_WINDOW, (void*)arg);
     
 	arg[0] = pThis->disp.sel;
-    arg[1] = pThis->disp.layerId;
+    arg[1] = pLayer->layerId;
     ioctl(pThis->disp.fd, DISP_CMD_VIDEO_START,  (void*)arg);
 }
 
-static void Disp_stop__ (void) {
+static void Disp_stop__ (DisplayLayer_t *pLayer) {
     
     __u32 arg[4];
     
 	arg[0] = pThis->disp.sel;
-    arg[1] = pThis->disp.layerId;
+    arg[1] = pLayer->layerId;
     ioctl(pThis->disp.fd, DISP_CMD_VIDEO_STOP,  (void*)arg);
 }
 
@@ -1366,36 +1695,36 @@ static int Disp_on__ (void) {
     return 0;
 }
 
-static int Disp_exit__ (void) {
+static int Disp_exit__ (DisplayLayer_t *pLayer) {
     
 	__u32 arg[4];
 	arg[0] = 0;
     //ioctl(pThis->disp.fd, DISPLAY_OFF, (void*)arg);
 
     arg[0] = pThis->disp.sel;
-    arg[1] = pThis->disp.layerId;
+    arg[1] = pLayer->layerId;
     ioctl(pThis->disp.fd, DISP_CMD_LAYER_CLOSE,  (void*)arg);
 
     arg[0] = pThis->disp.sel;
-    arg[1] = pThis->disp.layerId;
+    arg[1] = pLayer->layerId;
     ioctl(pThis->disp.fd, DISP_CMD_LAYER_RELEASE,  (void*)arg);
     close (pThis->disp.fd);
     
     return 0;
 }
 
-static int Disp_set_addr__ (int w,int h,int *addr) {
+static int Disp_set_addr__ (DisplayLayer_t *pLayer, int w, int h, int *addr) {
     
     __u32 arg[4];
     
 #if 0
-	pThis->disp.layerPara.fb.addr[0]       = *addr;//your Y address,modify this 
-    pThis->disp.layerPara.fb.addr[1]       = *addr+w*h; //your C address,modify this 
-    pThis->disp.layerPara.fb.addr[2]       = *addr+w*h*3/2; 
+	pLayer->layerPara.fb.addr[0]       = *addr;//your Y address,modify this 
+    pLayer->layerPara.fb.addr[1]       = *addr+w*h; //your C address,modify this 
+    pLayer->layerPara.fb.addr[2]       = *addr+w*h*3/2; 
     
     arg[0] = pThis->disp.sel;
-    arg[1] = pThis->disp.layerId;
-    arg[2] = (__u32)&pThis->disp.layerPara;
+    arg[1] = pLayer->layerId;
+    arg[2] = (__u32)&pLayer->layerPara;
     ioctl(pThis->disp.fd, DISP_CMD_LAYER_SET_PARA,(void*)arg);
 #endif
 
@@ -1421,13 +1750,13 @@ static int Disp_set_addr__ (int w,int h,int *addr) {
 	    	break;
 	    case V4L2_PIX_FMT_YUV420:
 	    	fb_addr.addr[1]       = *addr+w*h; //your C address,modify this 
-	    	fb_addr.addr[2]       = *addr+w*h*5/4;
+	    	//fb_addr.addr[2]       = *addr+w*h*5/4;//todo vratiti ako treba.. mada za uv kombinaciju ovo je nepotrebno
 	    	break;
 	    case V4L2_PIX_FMT_NV16:
 	    case V4L2_PIX_FMT_NV12:	
 	    case V4L2_PIX_FMT_HM12:	
 	    	fb_addr.addr[1]       = *addr+w*h; //your C address,modify this 
-	    	fb_addr.addr[2]       = pThis->disp.layerPara.fb.addr[1];
+	    	//fb_addr.addr[2]       = pLayer->layerPara.fb.addr[1];
 	    	break;
 	    
 	    default:
@@ -1438,11 +1767,40 @@ static int Disp_set_addr__ (int w,int h,int *addr) {
   	
   	fb_addr.id = 0;  //TODO
     arg[0] = pThis->disp.sel;
-    arg[1] = pThis->disp.layerId;
+    arg[1] = pLayer->layerId;
     arg[2] = (__u32)&fb_addr;
-    ioctl(pThis->disp.fd, DISP_CMD_VIDEO_SET_FB, (void*)arg);
+    if (ioctl(pThis->disp.fd, DISP_CMD_VIDEO_SET_FB, (void*)arg) == -1) {
+        DBG(KRED"ERROR set: DISP_CMD_VIDEO_SET_FB"KNRM);
+    }
     
     return 0;
+}
+
+static int Disp_newDecoder_frame__(DisplayLayer_t *pLayer, int w, int h, const uint32_t luma_buffer, 
+                                    const uint32_t chroma_buffer, const int id) {
+    uint32_t            args[4];
+	__disp_video_fb_t   fb_addr;
+    
+	memset(&fb_addr, 0, sizeof(__disp_video_fb_t));
+	fb_addr.id = id;
+	fb_addr.frame_rate = 25;
+    fb_addr.addr[0] = luma_buffer + DRAM_OFFSET;
+	fb_addr.addr[1] = chroma_buffer + DRAM_OFFSET;
+	//fb_addr.addr[0] = *pLuma_buffer + DRAM_OFFSET;
+	//fb_addr.addr[1] = *pChroma_buffer+w*h + DRAM_OFFSET;
+    //fb_addr.addr[0] = *pLuma_buffer;
+	//fb_addr.addr[1] = *pChroma_buffer+w*h;
+    //fb_addr.addr[2] = *pChroma_buffer + ((w*h)/4);
+    fb_addr.id = 0;
+	args[0] = 0;
+	args[1] = pLayer->layerId;
+	args[2] = (unsigned long)(&fb_addr);
+	args[3] = 0;
+
+    ioctl(pThis->disp.fd, DISP_CMD_VIDEO_SET_FB, (void*)args);
+	pLayer->lastId = id;
+
+	return 1;
 }
 
 //libturbojpeg
@@ -1467,7 +1825,6 @@ static void Tj_close__ (void) {
 //jpeg enc
 static void JpegEnc_encodePicture__ (const void *pFrame, int frameSize) {
     
-    static int          id = 0;
     int                 retval;
     int                 flags = TJFLAG_FASTDCT;
     unsigned long       yuvBuffSize;
@@ -1590,6 +1947,10 @@ static void JpegEnc_encodePicture__ (const void *pFrame, int frameSize) {
             fprintf(stderr, "#");
         }
         /* write to file */
+        {
+        CriticalSectionEnter__(&pThis->threadEncoder.mutex);
+        uint32_t    id = pThis->jpegEnc.id;
+        CriticalSectionExit__(&pThis->threadEncoder.mutex);
         snprintf(fname, sizeof(fname), "/tmp/testImage_%03d.jpg", id);
         printf("Save Image: %s -> size: %ld, width: %d, height: %d Bytesperline: %d\n", fname, 
                             _jpegSize, pThis->camera.size.width, pThis->camera.size.height, 
@@ -1601,7 +1962,9 @@ static void JpegEnc_encodePicture__ (const void *pFrame, int frameSize) {
                 fclose(pFile);
             }
         }
+        }
     } else if (pThis->jpegEnc.type == HW) {  /* ***** ***** HARDWARE VIDEO ENGINE ***** ***** */
+        CriticalSectionEnter__(&pThis->ve.mutex);                                      /* lock hw */
         /* compress image to jpeg by hardware */
         // flush output buffer, otherwise we might read old cached data
         ve_flush_cache(pThis->jpegEnc.hwj.JpegBuff, MAX_JPEG_SIZE);
@@ -1638,26 +2001,33 @@ static void JpegEnc_encodePicture__ (const void *pFrame, int frameSize) {
         if (pThis->output_marks) {
             fprintf(stderr, "#");
         }
+        {
+        CriticalSectionEnter__(&pThis->threadEncoder.mutex);
+        uint32_t    id = pThis->jpegEnc.id;
+        CriticalSectionExit__(&pThis->threadEncoder.mutex);
         snprintf(fname, sizeof(fname), "/tmp/testImage_%03d.jpg", id);
         vejpeg_write_file(fname, pThis->jpegEnc.hwj.JpegBuff, pThis->jpegEnc.hwj.Jwritten);
-        //printf("[JEPOC] written %d bytes to %s\n", pThis->jpegEnc.hwj.Jwritten, fname);
-        
+        printf("[JEPOC] written %d bytes to %s\n", pThis->jpegEnc.hwj.Jwritten, fname);
+        }
         //printBuffer__((uint8_t*)pFrame+100, 100, "pFrame");
         //printBuffer__(pThis->ve.pLumaSrc+100, 100, "Ysrc");
         //printBuffer__(pThis->ve.pChromaSrc+100, 100, "Csrc");
         //printBuffer__(pThis->jpegEnc.hwj.JpegBuff+100, 100, "JpegBuff");
         veavc_release_subengine();
+        CriticalSectionExit__(&pThis->ve.mutex);                                     /* unlock hw */
     }
 
 bailout:
-    id++;
+        CriticalSectionEnter__(&pThis->threadEncoder.mutex);
+        pThis->jpegEnc.id++;
+        CriticalSectionExit__(&pThis->threadEncoder.mutex);
 }
 
 //hw VE (VideoEngine)
 static void Ve_init__ (void) {
     
     ve_init();                                                              /* init video encoder */
-    if ((pThis->ve.pRegs = ve_open()) == NULL) {                               /* open video encoder */
+    if ((pThis->ve.pRegs = ve_open()) == NULL) {                            /* open video encoder */
         DBG("Ve_init_error!");
         exit(EXIT_FAILURE);
     }
@@ -1759,12 +2129,20 @@ static void Ve_fillInputBuffers__ (const void *pFrame, int frameSize) {
 static void Ve_selectSubengine__ (VeSubengType_t subengine) {
 
     switch (subengine) {
+        case SUBENG_MPEG: {
+            veavc_select_subengine(VE_ENGINE_MPEG);
+            break;
+        }
+        case SUBENG_H264: {
+            veavc_select_subengine(VE_ENGINE_H264);
+            break;
+        }
         case SUBENG_ISP: {
-            veavc_select_ISPsubengine();
+            veavc_select_subengine(VE_ENGINE_ISP);
             break;
         }
         case SUBENG_AVCENC: {
-            veavc_select_subengine();
+            veavc_select_subengine(VE_ENGINE_AVC);
             break;
         }
         default: {
@@ -1835,9 +2213,9 @@ static void H264enc_init__ (void) {
 		exit(EXIT_FAILURE);
 	}
     
-    pThis->ve.h264enc.profileIdc = 77;
-    pThis->ve.h264enc.levelIdc = 41;
-    pThis->ve.h264enc.ecMode = H264_EC_CABAC;                                    /* entropyCoding */
+    pThis->ve.h264enc.profileIdc = 77;                                    /* Main Profile (MP,77) */
+    pThis->ve.h264enc.levelIdc = 41;                                                 /* level 4.1 */
+    pThis->ve.h264enc.ecMode = H264_EC_CABAC;      /* entropyCoding: H264_EC_CAVLC, H264_EC_CABAC */
 	pThis->ve.h264enc.qp = 24;                                                      /* range 1-47 */
 	pThis->ve.h264enc.keyframeInterval = 25;
     
@@ -1927,6 +2305,7 @@ static void H264enc_free__ (void) {
 static int H264enc_encodePicture__ (void) {
 	pThis->ve.h264enc.sliceType = pThis->ve.h264enc.frameNum ? SLICE_P : SLICE_I;
 
+    CriticalSectionEnter__(&pThis->ve.mutex);                                           /* lock hw */
     Ve_selectSubengine__(SUBENG_AVCENC);
 
 	/* flush buffers (output because otherwise we might read old data later) */
@@ -2014,7 +2393,8 @@ static int H264enc_encodePicture__ (void) {
 		pThis->ve.h264enc.frameNum = 0;
 
     veavc_release_subengine();                                           /* release avc subengine */
-
+    CriticalSectionExit__(&pThis->ve.mutex);                                          /* unlock hw */
+    
 	return (status & 0x3) == 0x1;
 }
 
@@ -2164,6 +2544,192 @@ static void put_slice_header__ (void) {
 	put_ue__(/* disable_deblocking_filter_idc = */ 0);
 	put_se__(/* slice_alpha_c0_offset_div2 = */ 0);
 	put_se__(/* slice_beta_offset_div2 = */ 0);
+}
+
+//hw jpeg decoder
+static void JpegDec_init__ (void) {
+
+    pThis->ve.jpegdec.input_buffer = NULL;
+    pThis->ve.jpegdec.luma_buffer = NULL;
+    pThis->ve.jpegdec.chroma_buffer = NULL;
+}
+
+static void JpegDec_decode__ (struct jpeg_t *jpeg) {
+
+    int input_size;
+    int output_size;
+    
+    DBGF();
+
+    CriticalSectionEnter__(&pThis->ve.mutex);                                          /* lock hw */
+    /* free previous allocated buffers */
+    if (pThis->ve.jpegdec.input_buffer != NULL) {
+        ve_free(pThis->ve.jpegdec.input_buffer);
+        ve_free(pThis->ve.jpegdec.luma_buffer);
+        ve_free(pThis->ve.jpegdec.chroma_buffer);
+        pThis->ve.jpegdec.input_buffer = NULL;
+        pThis->ve.jpegdec.luma_buffer = NULL;
+        pThis->ve.jpegdec.chroma_buffer = NULL;
+    }
+    /* allocate new input and output buffers */
+    input_size = (jpeg->data_len + 65535) & ~65535;
+    pThis->ve.jpegdec.input_buffer = ve_malloc(input_size);
+    output_size = ((jpeg->width + 31) & ~31) * ((jpeg->height + 31) & ~31);
+    pThis->ve.jpegdec.luma_buffer = ve_malloc(output_size);
+    pThis->ve.jpegdec.chroma_buffer = ve_malloc(output_size);
+    
+    /* copy source frame to ve buffer */
+    memcpy(pThis->ve.jpegdec.input_buffer, jpeg->data, jpeg->data_len);
+    ve_flush_cache(pThis->ve.jpegdec.input_buffer, jpeg->data_len);
+
+    /* select MPEG engine */
+    Ve_selectSubengine__(SUBENG_MPEG);
+
+    /* set restart interval (DRI marker) */
+    writel(jpeg->restart_interval, pThis->ve.pRegs + VE_MPEG_JPEG_RES_INT); 
+
+    /* set JPEG format */
+    JpegDec_setFormat__(jpeg);
+
+    /* set raw output buffers (Luma / Croma) */
+    /* Luma Rotate/Scale Output Buffer Address (must be 1KB aligned)  */
+    writel(ve_virt2phys(pThis->ve.jpegdec.luma_buffer), pThis->ve.pRegs + VE_MPEG_ROT_LUMA);
+    /* Chroma Rotate/Scale Output Buffer Address (must be 1KB aligned)  */
+    writel(ve_virt2phys(pThis->ve.jpegdec.chroma_buffer), pThis->ve.pRegs + VE_MPEG_ROT_CHROMA);
+
+    /* set JPEG size */
+    JpegDec_setSize__(jpeg);
+
+    /* ?? - Used for control Rotate/Scale buffer */
+    writel(0x00000000, pThis->ve.pRegs + VE_MPEG_SDROT_CTRL);
+
+    /* set input end (video source buffer last address) */
+    writel(ve_virt2phys(pThis->ve.jpegdec.input_buffer) + input_size - 1, 
+           pThis->ve.pRegs + VE_MPEG_VLD_END);
+
+    /* ?? - IRQ enable flag */
+    writel(0x0000007c, pThis->ve.pRegs + VE_MPEG_CTRL);
+
+    /* set input offset in bits -VLD Offset in bits - current frame offset from VLD start address */
+    writel(0 * 8, pThis->ve.pRegs + VE_MPEG_VLD_OFFSET);
+
+    /* set input length in bits -  	VLD Length in bits - source video size */
+    writel(jpeg->data_len * 8, pThis->ve.pRegs + VE_MPEG_VLD_LEN);
+
+    /* set input buffer - VLD Address LOW bits (for first bits dropped from address),
+     * the 0x7 flag is used for both MPEG and JPEG decoding  */
+    writel(ve_virt2phys(pThis->ve.jpegdec.input_buffer) | 0x70000000, 
+            pThis->ve.pRegs + VE_MPEG_VLD_ADDR);
+
+    /* set Quantisation Table */
+    JpegDec_setQuantizationTables__(jpeg);
+
+    /* set Huffman Table */ /* Used for reload huffman table(JPEG decoding) */
+    writel(0x00000000, pThis->ve.pRegs + VE_MPEG_RAM_WRITE_PTR);
+    JpegDec_setHuffmanTables__(jpeg);
+
+    /* trigger decoding */
+    writeb(0x0e, pThis->ve.pRegs + VE_MPEG_TRIGGER);                                                //TODO probati sa 0xd
+    ve_wait(1); /* wait for interrupt */
+
+    /* clean interrupt flag (??) */
+    writel(0x0000c00f, pThis->ve.pRegs + VE_MPEG_STATUS);
+
+    /* stop MPEG engine */
+    veavc_release_subengine();
+    CriticalSectionExit__(&pThis->ve.mutex);                                         /* unlock hw */
+
+	//output_ppm(stdout, jpeg, output, output + (output_buf_size / 2));
+    //CriticalSectionExit__(&pThis->ve.mutex);                                         /* unlock hw */
+}
+
+static void JpegDec_setFormat__ (struct jpeg_t *jpeg) {
+
+	uint8_t fmt = (jpeg->comp[0].samp_h << 4) | jpeg->comp[0].samp_v;
+
+	switch (fmt) {
+        case 0x11: {
+            writeb(0x1b, pThis->ve.pRegs + VE_MPEG_TRIGGER + 0x3);
+            break;
+        }
+        case 0x21: {
+            writeb(0x13, pThis->ve.pRegs + VE_MPEG_TRIGGER + 0x3);
+            break;
+        }
+        case 0x12: {
+            writeb(0x23, pThis->ve.pRegs + VE_MPEG_TRIGGER + 0x3);
+            break;
+        }
+        case 0x22: {
+            writeb(0x03, pThis->ve.pRegs + VE_MPEG_TRIGGER + 0x3);
+            break;
+        }
+        default: {
+            break;
+        }
+	}
+}
+
+static void JpegDec_setSize__ (struct jpeg_t *jpeg) {
+    
+    uint16_t height;
+    uint16_t width;
+    
+    height = (jpeg->height - 1) / (8 * jpeg->comp[0].samp_v);
+	width = (jpeg->width - 1) / (8 * jpeg->comp[0].samp_h);
+	writel((uint32_t)height << 16 | width, pThis->ve.pRegs + VE_MPEG_JPEG_SIZE);
+}
+
+static void JpegDec_setQuantizationTables__ (struct jpeg_t *jpeg) {
+
+	int i;
+    
+	for (i = 0; i < 64; i++) {
+		writel((uint32_t)(64 + i) << 8 | jpeg->quant[0]->coeff[i], 
+                pThis->ve.pRegs + VE_MPEG_IQ_MIN_INPUT);
+    }
+	for (i = 0; i < 64; i++) {
+		writel((uint32_t)(i) << 8 | jpeg->quant[1]->coeff[i], 
+                pThis->ve.pRegs + VE_MPEG_IQ_MIN_INPUT);
+    }
+}
+
+static void JpegDec_setHuffmanTables__ (struct jpeg_t *jpeg) {
+
+    uint32_t buffer[512];
+	int i;
+    
+    memset(buffer, 0, 4*512);
+    
+	for (i = 0; i < 4; i++) {
+		if (jpeg->huffman[i]) {
+			int j, sum, last;
+
+			last = 0;
+			sum = 0;
+			for (j = 0; j < 16; j++) {
+				((uint8_t *)buffer)[i * 64 + 32 + j] = sum;
+				sum += jpeg->huffman[i]->num[j];
+				if (jpeg->huffman[i]->num[j] != 0) {
+					last = j;
+                }
+			}
+			memcpy(&(buffer[256 + 64 * i]), jpeg->huffman[i]->codes, sum);
+			sum = 0;
+			for (j = 0; j <= last; j++) {
+				((uint16_t *)buffer)[i * 32 + j] = sum;
+				sum += jpeg->huffman[i]->num[j];
+				sum *= 2;
+			}
+			for (j = last + 1; j < 16; j++) {
+				((uint16_t *)buffer)[i * 32 + j] = 0xffff;
+			}
+		}
+	}
+
+	for (i = 0; i < 512; i++) {
+		writel(buffer[i], pThis->ve.pRegs + VE_MPEG_RAM_WRITE_DATA);
+	}
 }
 
 //other

@@ -1,23 +1,24 @@
 tvin2jpeg Licenses
 ======================
 
-Proof of Concept TV-IN and hardware accelerated H264-JPEG encoder for sunxi.
-Example app for TV-IN, captures N frames from /dev/video1 (tvin cvbs), send output to hdmi or parallel LCD, 
-compress it to jpeg images /tmp/testImageXXX.jpg and/or h264 saving the raw h264 stream to /tmp/tvin.h264 
-and mux it to mkv container /tmp/tvin.mkv.
-This is a basic example for using the tvin, H264-JPEG hardware encoder for sunxi SoCs.
+Proof of Concept TV-IN and hardware accelerated H264-JPEG encoder and JPEG decoder for sunxi.
+Example app for TV-IN, captures N frames from /dev/video1 (tvin cvbs), send output to hdmi or parallel LCD. 
+Compress it to jpeg images /tmp/testImageXXX.jpg and/or h264 saving the raw h264 stream to /tmp/tvin.h264 
+and mux it to mkv container /tmp/tvin.mkv. After each jpeg-encoded frame, jpeg decoder decode same 
+/tmp/testImageXXX.jpeg image and show it on dispplay (right up position).
+This is a basic example for using the tvin, H264-JPEG hardware encoder and JPEG decoder for sunxi SoCs.
 This example includes:
 - Using analogue input TV decoder (CVBS).
 - Compress tvin to jpeg using sw libjpegturbo.
 - Hw scaling. Scale input PAL 720x576 to VGA or QVGA.
-- Simultaneous HW encoding jpeg and h264 with some kind of time slicing.
+- Simultaneous HW encoding jpeg, h264 and decoding jpeg with some kind of time slicing.
 It is just a proof of concept and not recommended for production use!
 
 Edit:
 Based on PoC sunxi-tvin by Enrico Butera: https://github.com/ebutera/sunxi-tvin
 Based on PoC jpeg encoder by Manuel Braga: https://gitorious.org/recedro/jepoc
 But gitorious has been closed down and therefore the link "https://gitorious.org/recedro/jepoc" is no longer working.
-Based on PoC h264 encoder by Jens Kuske: https://github.com/jemk/cedrus
+Based on PoC h264 encoder and jpeg decoder by Jens Kuske: https://github.com/jemk/cedrus
 
 Modified by Milos Ladicorbic milos.ladicorbic@gmail.com
 I merged this three PoC software and tested it on Allwinner A20 (awsomA20 - https://aw-som.com/product_info.php?products_id=32).
@@ -70,3 +71,10 @@ $ ./sunxi-tvin2jpeg --p -c 10 -C 10 -q 85 --readFile /tmp/frame_000_yuy2_720x576
 compress it to jpeg with hw encoder, compress it to h264.
 $ time ./sunxi-tvin2jpeg --p -c 200 -C 200 -q 85 --jpegEnc 2 --scale 2 --h264enc --o
 Play it with vlc, ffplay etc...
+
+- Take 500 frames, show frame on display by sunxi display engine in smaller resolution 542x359 
+position x30y121 (use display scaler), encode frame to jpeg, decode same frame from jpeg to raw, 
+show decodec frame on display (right up position 200x150 x580y121), encode frame from camera to h264 
+/tmp/tvin.h264 and mux it to mkv container /tmp/tvin.mkv.
+Do all this operation simultaneous 25 fps and ~20% CPU.
+$ ./sunxi-tvin2jpeg_h264 -c 500 -C 500 -q 85 --jpegEnc 2 --scale 1 --p --h264enc --jpegDec

@@ -57,8 +57,7 @@ void veisp_init_pictureMbWithDivision(uint32_t width_mb, uint32_t height_mb, vei
 void veisp_triger (void);
 void veisp_set_scaler (uint32_t newwidth, uint32_t newheight, float offsetx, float offsety, float scalex, float scaley);
 
-void veavc_select_subengine(void);                                 /* select h264-jpeg encoder VE */
-void veavc_select_ISPsubengine(void);                                            /* select ISP VE */
+void veavc_select_subengine(uint8_t engine);               /* select h264-jpeg encoder-decoder VE */
 void veavc_release_subengine(void);                                          /* release subengine */ 
 void veavc_subengine_reset(void);                                              /* reset subengine */
 void veavc_init_vle(uint8_t *J, uint32_t size);

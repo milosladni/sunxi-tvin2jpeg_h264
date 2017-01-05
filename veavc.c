@@ -25,18 +25,10 @@
 
 static veavc_encoder_mode_t encoder_mode = VEAVC_ENCODER_MODE_H264;
 
-void veavc_select_subengine(void)
-{
-	uint32_t ctrl = L(VE_CTRL);
-	ctrl = (ctrl & 0xfffffff0) | 0xb;
-	S(ctrl, VE_CTRL);
-}
-
-void veavc_select_ISPsubengine (void) {
+void veavc_select_subengine(uint8_t engine) {
     
 	uint32_t ctrl = L(VE_CTRL);
-    
-	ctrl = (ctrl & 0xfffffff0) | 0xa;
+	ctrl = (ctrl & 0xfffffff0) | (engine & 0xf);
 	S(ctrl, VE_CTRL);
 }
 

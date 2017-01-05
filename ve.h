@@ -54,6 +54,12 @@ extern void *regs;
 #define S(val, off)	writel(val, regs + (off))
 #define L(off)		readl(regs + (off))
 
+/* video engine subengine type */
+#define VE_ENGINE_MPEG			0x0
+#define VE_ENGINE_H264		    0x1
+#define VE_ENGINE_ISP           0xa
+#define VE_ENGINE_AVC			0xb
+
 /* MACC - Media Accelerate GENERAL VE registers */
 #define VE_CTRL				0x000
 #define VE_SUBENGINE_RESET  0x004   //milos - subengine reset

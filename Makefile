@@ -6,7 +6,7 @@ CC = arm-linux-gnueabihf-gcc
 CFLAGS= -Wall -march=armv7-a -mtune=cortex-a7 -mfpu=neon-vfpv4 -ffast-math -mfloat-abi=hard -Ofast
 #CFLAGS = -Wall -march=armv7-a -mtune=cortex-a7 -mfpu=neon-vfpv4 -ffast-math -mfloat-abi=hard -O0
 
-LDFLAGS += -L/home/milos/A20/a10_iptRootfs/usr/lib/arm-linux-gnueabihf
+LDFLAGS += -L/home/milos/A20/a10_iptRootfs/usr/lib/arm-linux-gnueabihf/neon/vfp
 LDFLAGS	+= -lavformat -lavcodec -lavutil
 
 EXE = $(shell basename `pwd`)

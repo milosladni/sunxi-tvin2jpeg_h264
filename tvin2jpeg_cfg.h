@@ -17,11 +17,16 @@
 //#define USE_HDMI
 #define USE_LCD
 /* Output picture resolution (this is not hw display resolution) */
-#define DISP_SCN_WIDTH	542
-#define DISP_SCN_HEIGHT	359
+/* defile display layers (DL) */
+#define DISP_DL_RAW_SCN_WIDTH	542
+#define DISP_DL_RAW_SCN_HEIGHT	359
+#define DISP_DL_JPEG_SCN_WIDTH	200
+#define DISP_DL_JPEG_SCN_HEIGHT	150
 /* Picture position */
-#define DISP_SCN_POS_X  30;
-#define DISP_SCN_POS_Y  121;
+#define DISP_DL_RAW_SCN_POS_X  30
+#define DISP_DL_RAW_SCN_POS_Y  121
+#define DISP_DL_JPEG_SCN_POS_X  580
+#define DISP_DL_JPEG_SCN_POS_Y  121
 
 #endif                                                                        /* TVIN2JPEG_CFG_H_ */
 

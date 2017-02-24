@@ -107,7 +107,7 @@ extern void *regs;
 #define VE_H264_VLD_LEN			0x238
 #define VE_H264_VLD_END			0x23c
 #define VE_H264_SDROT_CTRL		0x240
-#define VE_H264_OUTPUT_FRAME_IDX	0x24c
+#define VE_H264_OUTPUT_FRAME_IDX	0x24c                           //H264 output frame index in dpb
 #define VE_H264_EXTRA_BUFFER1		0x250
 #define VE_H264_EXTRA_BUFFER2		0x254
 #define VE_H264_BASIC_BITS		0x2dc

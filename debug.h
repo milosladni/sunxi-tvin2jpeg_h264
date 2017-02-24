@@ -13,7 +13,9 @@
 
 #define DBG(format, ...) do { fprintf(stderr, KYEL"["KCYN"DEBUG"KYEL"] "KNRM format "\n", ##__VA_ARGS__); fflush(stdout); } while(0)
 #define DBGF(format, ...) do { fprintf(stderr, KYEL"["KCYN"DEBUG"KYEL"] "KNRM "f(%s) -> " format "\n", __FUNCTION__, ##__VA_ARGS__); fflush(stdout); } while(0)
+#define DBG_ONCE(format, ...) do { static uint8_t __once; if (!__once) { fprintf(stderr, KYEL"["KCYN"DEBUG"KYEL"] "KNRM format "\n", ##__VA_ARGS__); fflush(stdout); __once = 1; } } while(0)
 #else
 #define DBG(format, ...)
 #define DBGF(format, ...)
+#define DBG_ONCE(format, ...)
 #endif

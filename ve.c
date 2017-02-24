@@ -18,11 +18,11 @@
  *
  */
 
+#include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include <fcntl.h>
 #include <pthread.h>
 #include <assert.h>
 #include <stropts.h>
@@ -41,8 +41,8 @@ typedef enum {
     TRUE  = 1
 } bool_t;
 
-enum IOCTL_CMD
-{
+enum IOCTL_CMD {
+    
     /* CORE IOCTL */
 	IOCTL_UNKOWN = 0x100,
 	IOCTL_GET_ENV_INFO, /* 0x101 */ /* Get VE info. Memory offset, memory size and register ofset */
@@ -157,7 +157,7 @@ void* ve_open(void) { /* open and init VE */
 
     /* set general control register */
     //ctrl = 0x00130007;
-    ctrl = 0x00000007;
+    ctrl = 0x00000007;                        /* Note: selecting 0x7 mean 'place in reset state'  */
     ctrl |= 0x13 << 16;                                                /* select DDR3 memory type */
     //ctrl = 0x01 << 5;
     //ctrl = 0x01 << 6;
@@ -179,8 +179,9 @@ err:
 
 void ve_close(void) { /* deinit and close VE */
     
-	if (ve.fd == -1)
+	if (ve.fd == -1) {
 		return;
+    }
 
 	ioctl(ve.fd, IOCTL_DISABLE_VE, 0);              /* 0x105 */ /* disable base clocks for cedarx */
 	ioctl(ve.fd, IOCTL_ENGINE_REL, 0);                  /* 0x207 */ /* decrement reference count  */
@@ -206,39 +207,41 @@ void ve_flush_cache(void *start, int len) {                /* flush cache (neded
 	ioctl(ve.fd, IOCTL_FLUSH_CACHE, (void*)(&cacheRange)); /* 0x20b */ /* do invalidate CPU cache for internal cedar dma  */
 }
 
-void *ve_get_regs(void)
-{
+void *ve_get_regs(void) {
+    
 	if (ve.fd == -1)
 		return NULL;
 
 	return ve.pRegs;
 }
 
-int ve_get_version(void)
-{
+int ve_get_version(void) {
+    
 	return ve.version;
 }
 
-int ve_wait(int timeout)
-{
+int ve_wait(int timeout) {
+    
 	if (ve.fd == -1)
 		return 0;
 
 	return ioctl(ve.fd, IOCTL_WAIT_VE, timeout);
 }
 
-void *ve_malloc(int size)
-{
+void *ve_malloc(int size) {
+    
 	if (ve.fd == -1)
 		return NULL;
         
 	if (MemLockWREnter__() == FALSE) {
 		return NULL;
     }
+    
+    void *addr = NULL;
 
-    printf("Malloc: %d ", size);
+    //printf("Malloc: %d ", size);
 	size = (size + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1); /* round it to page size blocks */
-    printf("NewSize: %d\n", size);
+    //printf("NewSize: %d\n", size);
 	Memchunk_t *currentChunk, *best_chunk = NULL;
 	for (currentChunk = &ve.FirstChunk; currentChunk != NULL; currentChunk = currentChunk->next) {
 		if(currentChunk->virt_addr == NULL && currentChunk->size >= size) {
@@ -252,13 +255,17 @@ void *ve_malloc(int size)
     }
 
 	if (!best_chunk) {
-        MemLockExit__();
-		return NULL;
+        goto out;
     }
 
 	int left_size = best_chunk->size - size;
 
-	best_chunk->virt_addr = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, ve.fd, best_chunk->phys_addr + PAGE_OFFSET);
+	addr = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, ve.fd, best_chunk->phys_addr + PAGE_OFFSET);
+    if (addr == MAP_FAILED) {
+        addr = NULL;
+		goto out;
+    }
+    best_chunk->virt_addr = addr;
 	best_chunk->size = size;
 
 	if (left_size > 0)
@@ -272,12 +279,13 @@ void *ve_malloc(int size)
 		best_chunk->next = nextChunk;
 	}
 
+out:
 	MemLockExit__();
-	return best_chunk->virt_addr;
+	return addr;
 }
 
-void ve_free(void *ptr)
-{
+void ve_free(void *ptr) {
+    
     Memchunk_t *currentChunk;
     
 	if (ve.fd == -1)
@@ -311,14 +319,16 @@ void ve_free(void *ptr)
     MemLockExit__();
 }
 
-uint32_t ve_virt2phys(void *ptr)
-{
+uint32_t ve_virt2phys(void *ptr) {
+    
 	if (ve.fd == -1)
 		return 0;
         
 	if (MemLockRDEnter__() == FALSE) {
 		return 0;
     }
+    
+    uint32_t addr = 0;
 
 	Memchunk_t *currentChunk;
 	for (currentChunk = &ve.FirstChunk; currentChunk != NULL; currentChunk = currentChunk->next) {
@@ -326,17 +336,17 @@ uint32_t ve_virt2phys(void *ptr)
 			continue;
         }
 		if (currentChunk->virt_addr == ptr) {
-            MemLockExit__();
-			return currentChunk->phys_addr;
+            addr = currentChunk->phys_addr;
+            break;
         } else if (ptr > currentChunk->virt_addr && 
                    ptr < (currentChunk->virt_addr + currentChunk->size)) {
-            MemLockExit__();
-			return currentChunk->phys_addr + (ptr - currentChunk->virt_addr);
+            addr = currentChunk->phys_addr + (ptr - currentChunk->virt_addr);
+            break;
         }
 	}
 
 	MemLockExit__();
-	return 0;
+	return addr;
 }
 
 

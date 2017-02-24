@@ -12,6 +12,7 @@ This example includes:
 - Compress tvin to jpeg using sw libjpegturbo.
 - Hw scaling. Scale input PAL 720x576 to VGA or QVGA.
 - Simultaneous HW encoding jpeg, h264 and decoding jpeg with some kind of time slicing.
+- Simultaneous jpegEnc, jpegDec, h264Enc, h264Dec.
 It is just a proof of concept and not recommended for production use!
 
 Edit:
@@ -35,6 +36,8 @@ Limitations:
 - ... many more
 
 Usage:
+     "\nUsage: %s [options]\n"
+     "Version %s\n"
      "Options:\n"
      "-h | --help          Print this message\n"
      "-c | --count         Number of frames to grab\n"
@@ -46,16 +49,20 @@ Usage:
      "-p | --preview       Preview frames to display\n"
      "-f | --reafFile      Get frame from file\n"
      "     --yuvToRgb      Convert yuv4:2:2 -> rgb -> jpeg\n"
-     "     --jpegEnc       Select software or hardware jpeg encoder (Default: 1)\n"
-     "                      | 0 -> disable  |\n"
-     "                      | 1 -> SW       |\n"
-     "                      | 2 -> HW       |\n"
+     "     --jpegEnc       Enable jpeg encoder.\n"
+     "                     Select software or hardware jpeg encoder:\n"
+     "                         | 1 -> SW       |\n"
+     "                         | 2 -> HW       |\n"
      "     --scale         Scale source image to (Default: none):\n"
-     "                     NOTE: it must be uset with HW encoder.\n"
-     "                      | 0 -> none                  |\n"
-     "                      | 1 -> ARBITRARY-SCALER-VGA  |\n"
-     "                      | 2 -> ARBITRARY-SCALER_QVGA |\n"
-     "     --h264Enc       Enable h264Encoder (Default: Disabled)\n"
+     "                         NOTE: It can be only used with HW encoder.\n"
+     "                         | 0 -> none                  |\n"
+     "                         | 1 -> ARBITRARY-SCALER-VGA  |\n"
+     "                         | 2 -> ARBITRARY-SCALER_QVGA |\n"
+     "     --h264Enc       Enable H264 Encoder (Default: Disabled)\n"
+     "     --jpegDec       Enable jpeg Decoder (Default: Disabled)\n"
+     "                         Note: It can be only used with jpeg encoder.\n"
+     "     --h264Dec       Enable H264 Decoder (Default: Disabled)\n"
+
 
 Examples:
 - Take 100 frames from tvd and show it on display:
@@ -78,3 +85,7 @@ show decodec frame on display (right up position 200x150 x580y121), encode frame
 /tmp/tvin.h264 and mux it to mkv container /tmp/tvin.mkv.
 Do all this operation simultaneous 25 fps and ~20% CPU.
 $ ./sunxi-tvin2jpeg_h264 -c 500 -C 500 -q 85 --jpegEnc 2 --scale 1 --p --h264enc --jpegDec
+
+- All four operation simultaneous:
+(The source for h264 decoder is raw h264 bitstream)
+$ time ./sunxi-tvin2jpeg_h264 -c 300 -q 85 --jpegEnc 2 --scale 2 --jpegDec --h264Dec /tmp/tvin_2.h264

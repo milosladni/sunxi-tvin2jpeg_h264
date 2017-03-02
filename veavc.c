@@ -118,7 +118,7 @@ void veavc_sdram_index(uint32_t index)
 void veavc_jpeg_quantization(uint16_t *tableY, uint16_t *tableC, uint32_t length)
 {
 	uint32_t data;
-	int i;
+	uint32_t i;
 
 	veavc_sdram_index(0x0);
 

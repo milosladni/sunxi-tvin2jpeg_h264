@@ -159,7 +159,7 @@ typedef struct VideoSurfaceTag {
 	int             luma_size;                                 /* luma plane size of decoded data */
 	void           *extra_data;
     //int             extra_data_len;
-	uint8_t         pos;                                                    //wat is this? position? koja pozicija?
+	uint8_t         pos;
     uint8_t         pic_type;
 } VideoSurface_t;
 

@@ -64,13 +64,14 @@
 
 #define DRAM_OFFSET (0x40000000)
 #define VLE_SIZE (1 * 1024 * 1024)
-#define VBV_SIZE (1 * 1024 * 1024)
+#define VBV_SIZE (4 * 1024 * 1024)
 #define NALU_BUFFER_LENGTH  4194304                                                           //2`22 //1024*1024*4
 
 #define MAX_FRAMES          25
 #define MAX_REFERENCES      NUM_REF_FRAMES
 #define OUTPUT_SURFACES     2
-#define MAX_DPB_SIZE        MAX_REFERENCES+2
+#define NUM_EXTRA_DPB_BUFF  6
+#define MAX_DPB_SIZE        MAX_REFERENCES + NUM_EXTRA_DPB_BUFF + 1
 
 #define H264DEC_MAX_WIDTH   3840UL
 #define H264DEC_MAX_HEIGHT  2160UL
@@ -360,6 +361,7 @@ struct H264DpbTag {
     
     //
     H264Frame_t     scratch_frames[MAX_DPB_SIZE];
+    uint32_t        lastUsedDpbId;
 };
 
 typedef struct H264DecTag {
@@ -373,14 +375,6 @@ typedef struct H264DecTag {
     //source parameters
     uint32_t        width, height;                                            /* video dimensions */
     uint32_t        framerate;                                                       /* framerate */
-    ChromaType_t    chromaType;
-    YCbCrFormat_t   sourceFormat;    
-    decoderProfile_t profileIdc;                                                   /* profile IDC */
-    unsigned int    levelIdc;                                                        /* level IDC */
-    unsigned int    constraints;                                                   /* constraints */
-	entropyCoding_t ecMode;                                                      /* entropyCoding */
-	unsigned int    qp;  /* quantization parameter, QP, that ranges from 0 to 51, picture init qp */
-    int             plane_size;                                                                     //TODO da li trebam? ovo imam u output surface
     //
     H264Dpb_t       dpb;                                                /* decoded picture buffer */
     Gst_t           gst;
@@ -392,13 +386,13 @@ typedef struct H264DecTag {
     void           *data;  /* VBV data (Video Buffering Verifier). Input buffer which contains input bitestream (one instance of NAL) */
     uint32_t        dataLen;                    /* Size of input bitestream (one instance of NAL) */
     void           *extra_data;                                           /* extra working buffer */
+    int             extra_data_size;
     /* output surfaces */
-    VideoSurface   output[OUTPUT_SURFACES];
+    VideoSurface    output[OUTPUT_SURFACES];
+    int             video_extra_data_len;
     /* debug */
     double          maxTimeForOneFrame;
     double          minTimeForOneFrame;
-    
-    int             video_extra_data_len;
 } H264dec_t;
 
 typedef struct VeTag {                                                            /* video engine */
@@ -1623,19 +1617,24 @@ SPSPPS:
                         }
                         
                         /* copy all slices to VE buffer */
-                        memcpy(pThis->ve.h264dec.data, bitstreamBuffer.bitstream, nalLength);
-                        pThis->ve.h264dec.dataLen = nalLength - 8;                 /* flush cache */
-                        ve_flush_cache(pThis->ve.h264dec.data, pThis->ve.h264dec.dataLen);
-                        
+                        pThis->ve.h264dec.dataLen = nalLength - 8;
+                        memcpy(pThis->ve.h264dec.data, bitstreamBuffer.bitstream, 
+                               pThis->ve.h264dec.dataLen);
+                        memset(pThis->ve.h264dec.data + pThis->ve.h264dec.dataLen, 0, 
+                               VBV_SIZE - pThis->ve.h264dec.dataLen);
+                        /* flush cache */
+                        ve_flush_cache(pThis->ve.h264dec.data, VBV_SIZE);
+                        ve_flush_cache(pThis->ve.h264dec.extra_data, 
+                                       pThis->ve.h264dec.extra_data_size);
                         /* start decoding */
                         dpbSurface = Handle_get(h264Frame->surface);
-                        //outHandleId = (pThis->ve.h264dec.id % 2);
-                        //outputSurface = Handle_get(pThis->ve.h264dec.output[outHandleId]);
                         gettimeofday(&tvStart, 0);
                         DBG("DecodeH264.. Id: %d, DPB_SurfaceId: %d", pThis->ve.h264dec.id, 
                                 h264Frame->surface);
                         H264dec_decode__(pThis, &info, pThis->ve.h264dec.dataLen, 
                                          dpbSurface);
+                        //ve_flush_cache(pThis->ve.h264dec.data, VBV_SIZE);
+                        //ve_flush_cache(pThis->ve.h264dec.extra_data, pThis->ve.h264dec.extra_data_size);
                                                                              /* flush output data */
                         ve_flush_cache(dpbSurface->data, dpbSurface->size);
                         if (dpbSurface->extra_data != NULL) {
@@ -3511,6 +3510,7 @@ static void H264dec_new__ (H264dec_t *pH264dec) {
 
 	memset(pThis->ve.h264dec.extra_data, 0, extra_data_size);
 	ve_flush_cache(pThis->ve.h264dec.extra_data, extra_data_size);
+    pThis->ve.h264dec.extra_data_size = extra_data_size;
 }
 
 static void H264dec_free__ (void) {
@@ -3599,7 +3599,8 @@ static VcStatus H264dec_decode__ (Appl_t *pThis, PictureInfoH264_t const *info, 
     }
 	context->info = info;
 	context->output = output;
-    context->video_extra_data_len = ((pThis->ve.h264dec.width + 15) / 16) * ((pThis->ve.h264dec.height + 15) / 16) * 32;
+    context->video_extra_data_len = ((pThis->ve.h264dec.width + 15) / 16) * 
+                                    ((pThis->ve.h264dec.height + 15) / 16) * 32;
     
     pThis->ve.h264dec.video_extra_data_len = context->video_extra_data_len;//todo delete
     
@@ -3697,7 +3698,8 @@ static VcStatus H264dec_decode__ (Appl_t *pThis, PictureInfoH264_t const *info, 
 		writel(pos * 8, pThis->ve.pRegs + VE_H264_VLD_OFFSET);    /* set start position in bits.. */
 		uint32_t input_addr = ve_virt2phys(pThis->ve.h264dec.data);
 		writel(input_addr + VBV_SIZE - 1, pThis->ve.pRegs + VE_H264_VLD_END);/* end of bitestream buffer */
-		writel((input_addr & 0x0ffffff0) | (input_addr >> 28) | (0x7 << 28), pThis->ve.pRegs + VE_H264_VLD_ADDR);//set start data address
+		writel((input_addr & 0x0ffffff0) | (input_addr >> 28) | (0x7 << 28), 
+                pThis->ve.pRegs + VE_H264_VLD_ADDR);                    /* set start data address */
 
 		/* ?? some sort of reset maybe */
 		writel(0x7, pThis->ve.pRegs + VE_H264_TRIGGER);
@@ -3799,16 +3801,21 @@ static VcStatus H264dec_decode__ (Appl_t *pThis, PictureInfoH264_t const *info, 
 
         /* run decoder */
 		/* clear status flags */
+        //DBG("start: 0x%x", readl(pThis->ve.pRegs + VE_H264_STATUS));
 		writel(readl(pThis->ve.pRegs + VE_H264_STATUS), pThis->ve.pRegs + VE_H264_STATUS);
 		/* enable int */
 		writel(readl(pThis->ve.pRegs + VE_H264_CTRL) | 0x7, pThis->ve.pRegs + VE_H264_CTRL);
 		/* SHOWTIME - TRIGGER DECODER */
-        //DBG("Start Decode");
+        DBG("Start Decode: 0x%x, 0x%x", readl(pThis->ve.pRegs + VE_STATUS), readl(pThis->ve.pRegs + VE_H264_STATUS));
 		writel(0x8, pThis->ve.pRegs + VE_H264_TRIGGER);
 		ve_wait(1);
-        //DBG("Stop Decode");
+        DBG("Stop Decode");
 		/* clear status flags */
-		writel(readl(pThis->ve.pRegs + VE_H264_STATUS), pThis->ve.pRegs + VE_H264_STATUS);
+        uint32_t status;
+        status = readl(pThis->ve.pRegs + VE_H264_STATUS);
+        printf("Status: 0x%x\n", status);
+        writel(status, pThis->ve.pRegs + VE_H264_STATUS);
+        //writel(readl(pThis->ve.pRegs + VE_H264_STATUS), pThis->ve.pRegs + VE_H264_STATUS);
 
 		pos = (readl(pThis->ve.pRegs + VE_H264_VLD_OFFSET) / 8) - 3;
 	}
@@ -3816,7 +3823,6 @@ static VcStatus H264dec_decode__ (Appl_t *pThis, PictureInfoH264_t const *info, 
     ret = VC_STATUS_OK;
 
 err_ve_put:
-    //DBG("Release h264 Decoder..");
 	/* stop H264 decoder subengine */
     Ve_releaseSubengine__(pThis, SUBENG_H264_DEC);             /* release H264 Decoder, unlock HW */
 err_free:
@@ -3862,6 +3868,8 @@ static int H264dec_fillFrameLists__ (Appl_t *pThis, H264Context_t *context) {
 			VideoSurface_t *surface = Handle_get(rf->surface);
             H264dec_getSurfacePriv__(context, surface);
             if (!surface->extra_data) {
+                DBG(KRED"!surface->extra_data"KNRM);
+                assert(FALSE);
                 return 0;
             }
             
@@ -4454,7 +4462,8 @@ static int H264dec_idr__ (H264dec_t *h264Dec, H264Frame_t *h264Frame) {
         /* calculate framerate if we haven't got one */
         if (h264Dec->fps_n == 0 && seq->vui_parameters_present_flag) {
             GstH264VUIParams *vui;
-            uint16_t par_n, par_d;
+            uint16_t par_n = 0;
+            uint16_t par_d = 0;
             
             DBG("calculate framerate");
 
@@ -4840,6 +4849,7 @@ static void H264dec_dpb_init__ (H264Dpb_t *dpb) {
     dpb->n_frames = 0;
     dpb->max_longterm_frame_idx = -1;
     dpb->max_frames = MAX_REFERENCES;
+    dpb->lastUsedDpbId = 0;
     
     /* init reference frames */
     for (i = 0; i < MAX_DPB_SIZE; i++) {
@@ -4856,23 +4866,53 @@ static H264Frame_t* H264dec_dpb_alloc__ (H264dec_t *h264dec) {
     uint32_t    i;
 
     /* get reference frame */
-    for (i = 0; i < MAX_DPB_SIZE; i++) {
+    for (i = h264dec->dpb.lastUsedDpbId; i <= h264dec->dpb.max_frames + NUM_EXTRA_DPB_BUFF; i++) {
         /* try to find already allocated surface */
         if ((dpb->scratch_frames[i].is_reference == FALSE) &&
             (dpb->scratch_frames[i].output_needed == FALSE)) {
             
             if (dpb->scratch_frames[i].surface != VC_INVALID_HANDLE) {
                 DBGF("H264 Decoder => use old DPB surface: %d",  dpb->scratch_frames[i].surface);
+                h264dec->dpb.lastUsedDpbId = i;
                 return &dpb->scratch_frames[i];
             } else {
                 /* try to allocate new surface */
                 if (VideoSurface_create(CHROMA_TYPE_420, h264dec->width, h264dec->height,
                                         &dpb->scratch_frames[i].surface) != VC_STATUS_OK) {
                     DBGF(KRED"ERROR: H264 Decoder => create DPB reference surface!"KNRM);
+                    h264dec->dpb.lastUsedDpbId = 0;
                     return NULL;
                 } else {
                     DBGF("H264 Decoder => create DPB reference surface: %d", 
                             dpb->scratch_frames[i].surface);
+                    h264dec->dpb.lastUsedDpbId = i;
+                    return &dpb->scratch_frames[i];
+                }
+            }
+        }
+    }
+    
+    /* get reference frame */
+    for (i = 0; i <= h264dec->dpb.max_frames + NUM_EXTRA_DPB_BUFF; i++) {
+        /* try to find already allocated surface */
+        if ((dpb->scratch_frames[i].is_reference == FALSE) &&
+            (dpb->scratch_frames[i].output_needed == FALSE)) {
+            
+            if (dpb->scratch_frames[i].surface != VC_INVALID_HANDLE) {
+                DBGF("H264 Decoder => use old DPB surface: %d",  dpb->scratch_frames[i].surface);
+                h264dec->dpb.lastUsedDpbId = i;
+                return &dpb->scratch_frames[i];
+            } else {
+                /* try to allocate new surface */
+                if (VideoSurface_create(CHROMA_TYPE_420, h264dec->width, h264dec->height,
+                                        &dpb->scratch_frames[i].surface) != VC_STATUS_OK) {
+                    h264dec->dpb.lastUsedDpbId = 0;
+                    DBGF(KRED"ERROR: H264 Decoder => create DPB reference surface!"KNRM);
+                    return NULL;
+                } else {
+                    DBGF("H264 Decoder => create DPB reference surface: %d", 
+                            dpb->scratch_frames[i].surface);
+                    h264dec->dpb.lastUsedDpbId = i;
                     return &dpb->scratch_frames[i];
                 }
             }
@@ -5358,7 +5398,7 @@ static int Nal_getNextUnit__ (Appl_t *pThis, const void *pBuf, int *nalLength) {
     }
     *nalLength = nalEnd - nalStart + 4 + 4;
     if(*nalLength > NALU_BUFFER_LENGTH) {
-        DBG("Skipping jumbo sized NALU of size %x", *nalLength);
+        DBG(KRED"Skipping jumbo sized NALU of size %x"KNRM, *nalLength);
         return -1;
     }
     

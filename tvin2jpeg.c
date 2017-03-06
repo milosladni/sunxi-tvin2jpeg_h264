@@ -320,22 +320,20 @@ typedef struct JpegDecTag {
     double          minTimeForOneFrame;
 } JpegDec_t;
 
-typedef struct GstTag {
+typedef struct GstNalParserTag {
     GstH264NalParser   *parser;
     GstH264NalUnit     *nalu;
     GstH264SliceHdr    *slice;
     GstH264SPS         *sps;
     GstH264PPS         *pps;
     GstH264SEIMessage  *sei;
-} Gst_t;
+} GstNalParser_t;
 
 typedef struct H264DpbTag H264Dpb_t;
 
 typedef struct H264FrameTag {
     VideoSurface    surface;
-
     GstH264SliceHdr slice_hdr;
-    //GPtrArray *slices;        //?
 
     uint32_t  poc;
     uint32_t  frame_idx;
@@ -348,17 +346,12 @@ typedef struct H264FrameTag {
 typedef GstFlowReturn (*H264DPBOutputFunc) (H264Dpb_t *dpb, H264Frame_t *h264_frame, void *user_data);
 
 struct H264DpbTag {
-
-    /* private */
-    H264Frame_t *frames[MAX_REFERENCES];  
+    H264Frame_t *frames[MAX_REFERENCES];
     uint32_t    n_frames;
-
     uint32_t    max_frames;
     int32_t     max_longterm_frame_idx;
-
     H264DPBOutputFunc output;
     void       *user_data;
-    
     //
     H264Frame_t     scratch_frames[MAX_DPB_SIZE];
     uint32_t        lastUsedDpbId;
@@ -377,7 +370,7 @@ typedef struct H264DecTag {
     uint32_t        framerate;                                                       /* framerate */
     //
     H264Dpb_t       dpb;                                                /* decoded picture buffer */
-    Gst_t           gst;
+    GstNalParser_t  gst;
     bool_t          got_idr;
     uint32_t        poc_msb;
     uint32_t        prev_poc_lsb;
@@ -566,7 +559,7 @@ static void H264dec_dpb_finalize__(H264Dpb_t *dpb);
 static void H264dec_dpb_set_NumRefFrames__(H264Dpb_t *dpb, uint32_t numRefFrames);
 static void H264dec_dpb_set_MaxLongTermIdx__(H264Dpb_t *dpb, int32_t maxLongTermIdx);
 //h264 decoder continue..
-static GstFlowReturn H264_dec_output__(H264Dpb_t *dpb, H264Frame_t *h264_frame, void *user_data);
+static GstFlowReturn H264dec_output__(H264Dpb_t *dpb, H264Frame_t *h264_frame, void *user_data);
 static bool_t H264dec_flush__(Appl_t *pThis);
 static bool_t H264dec_calculatePar__(GstH264VUIParams *vui, uint16_t *par_n, uint16_t *par_d);
 static void H264dec_initFrameInfo__(H264dec_t *h264_dec, GstH264NalUnit *nalu, H264Frame_t *h264_frame);
@@ -3456,7 +3449,7 @@ static void H264dec_init__ (void) {
     memset(&pThis->ve.h264dec.gst, 0, sizeof(pThis->ve.h264dec.gst));
     
     H264dec_dpb_init__(&pThis->ve.h264dec.dpb);
-    H264dec_dpb_setOutputFunc__(&pThis->ve.h264dec.dpb, H264_dec_output__, pThis);
+    H264dec_dpb_setOutputFunc__(&pThis->ve.h264dec.dpb, H264dec_output__, pThis);
     
     /* init output surfaces */
     for (i = 0; i < OUTPUT_SURFACES; i++) {
@@ -3806,14 +3799,14 @@ static VcStatus H264dec_decode__ (Appl_t *pThis, PictureInfoH264_t const *info, 
 		/* enable int */
 		writel(readl(pThis->ve.pRegs + VE_H264_CTRL) | 0x7, pThis->ve.pRegs + VE_H264_CTRL);
 		/* SHOWTIME - TRIGGER DECODER */
-        DBG("Start Decode: 0x%x, 0x%x", readl(pThis->ve.pRegs + VE_STATUS), readl(pThis->ve.pRegs + VE_H264_STATUS));
+        //DBG("Start Decode: 0x%x, 0x%x", readl(pThis->ve.pRegs + VE_STATUS), readl(pThis->ve.pRegs + VE_H264_STATUS));
 		writel(0x8, pThis->ve.pRegs + VE_H264_TRIGGER);
 		ve_wait(1);
-        DBG("Stop Decode");
+        //DBG("Stop Decode");
 		/* clear status flags */
         uint32_t status;
         status = readl(pThis->ve.pRegs + VE_H264_STATUS);
-        printf("Status: 0x%x\n", status);
+        //printf("Status: 0x%x\n", status);
         writel(status, pThis->ve.pRegs + VE_H264_STATUS);
         //writel(readl(pThis->ve.pRegs + VE_H264_STATUS), pThis->ve.pRegs + VE_H264_STATUS);
 
@@ -4157,7 +4150,7 @@ static void H264dec_decodeSliceHeader__ (H264Context_t *context) {
 
 static void* H264dec_getSurfacePriv__ (H264Context_t *context, VideoSurface_t *surface) {
 
-	if (!surface->extra_data) {
+	if (surface->extra_data == NULL) {
 		surface->extra_data = ve_malloc(context->video_extra_data_len * 2);
 		if (!surface->extra_data) {
 			return NULL;
@@ -4646,7 +4639,7 @@ static GstFlowReturn H264dec_dpb_add__ (H264Dpb_t *dpb, H264Frame_t *h264_frame)
     //     h264_frame->is_reference == TRUE ? "TRUE" : "FALSE");
 
     if ((h264_frame->is_reference && h264_frame->is_long_term) &&
-        (h264_frame->frame_idx > dpb->max_longterm_frame_idx)) {
+        ((int32_t)h264_frame->frame_idx > dpb->max_longterm_frame_idx)) {
         h264_frame->is_reference = FALSE;
     }
     
@@ -4986,7 +4979,7 @@ static void H264dec_dpb_set_MaxLongTermIdx__ (H264Dpb_t *dpb, int32_t maxLongTer
       frames = dpb->frames;
       for (i = dpb->n_frames; i < dpb->n_frames; i++) {
           if (frames[i]->is_reference && frames[i]->is_long_term &&
-              frames[i]->frame_idx > dpb->max_longterm_frame_idx) {
+              (int32_t)frames[i]->frame_idx > dpb->max_longterm_frame_idx) {
               frames[i]->is_reference = FALSE;
               if (!frames[i]->output_needed) {
                   H264dec_dpb_remove__(dpb, i);
@@ -4996,7 +4989,7 @@ static void H264dec_dpb_set_MaxLongTermIdx__ (H264Dpb_t *dpb, int32_t maxLongTer
       }
 }
 
-static GstFlowReturn H264_dec_output__ (H264Dpb_t *dpb, H264Frame_t *h264_frame, void *user_data) {
+static GstFlowReturn H264dec_output__ (H264Dpb_t *dpb, H264Frame_t *h264_frame, void *user_data) {
 
     Appl_t *pThis;
     VideoSurface_t *dpbSurface;

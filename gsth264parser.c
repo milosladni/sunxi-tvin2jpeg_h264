@@ -80,6 +80,8 @@
  * </itemizedlist>
  */
 
+#include "debug.h"
+
 #ifdef HAVE_CONFIG_H
 #  include "config.h"
 #endif
@@ -90,6 +92,8 @@
 #include <gst/base/gstbytereader.h>
 #include <gst/base/gstbitreader.h>
 #include <string.h>
+
+#define UNUSED_ARGUMENT(x_) (void)(x_)
 
 GST_DEBUG_CATEGORY (h264_parser_debug);
 #define GST_CAT_DEFAULT h264_parser_debug
@@ -762,7 +766,7 @@ gst_h264_slice_parse_pred_weight_table (GstH264SliceHdr * slice,
 {
   GstH264PredWeightTable *p;
   gint16 default_luma_weight, default_chroma_weight;
-  gint i;
+  guint32 i;
 
   GST_DEBUG ("parsing \"Prediction weight table\"");
 
@@ -1049,6 +1053,7 @@ static GstH264ParserResult
 gst_h264_parser_parse_stereo_video_info (GstH264NalParser * nalparser,
     GstH264StereoVideoInfo * info, NalReader * nr)
 {
+    UNUSED_ARGUMENT(nalparser);
   GST_DEBUG ("parsing \"Stereo Video info\"");
 
   READ_UINT8 (nr, info->field_views_flag, 1);
@@ -1075,6 +1080,7 @@ gst_h264_parser_parse_frame_packing (GstH264NalParser * nalparser,
 {
   guint8 frame_packing_extension_flag;
   guint start_pos;
+  UNUSED_ARGUMENT(nalparser);
 
   GST_DEBUG ("parsing \"Frame Packing Arrangement\"");
 
@@ -1277,6 +1283,7 @@ gst_h264_parser_identify_nalu_unchecked (GstH264NalParser * nalparser,
     const guint8 * data, guint offset, gsize size, GstH264NalUnit * nalu)
 {
   gint off1;
+  UNUSED_ARGUMENT(nalparser);
 
   memset (nalu, 0, sizeof (*nalu));
 
@@ -1401,6 +1408,7 @@ gst_h264_parser_identify_nalu_avc (GstH264NalParser * nalparser,
     GstH264NalUnit * nalu)
 {
   GstBitReader br;
+  UNUSED_ARGUMENT(nalparser);
 
   memset (nalu, 0, sizeof (*nalu));
 
@@ -1667,6 +1675,7 @@ gst_h264_parse_sps_mvc_data (NalReader * nr, GstH264SPS * sps,
   GstH264SPSExtMVC *const mvc = &sps->extension.mvc;
   guint8 bit_equal_to_one;
   guint i, j, k;
+  UNUSED_ARGUMENT(parse_vui_params);
 
   READ_UINT8 (nr, bit_equal_to_one, 1);
   if (!bit_equal_to_one)
@@ -1943,12 +1952,12 @@ gst_h264_parse_pps (GstH264NalParser * nalparser, GstH264NalUnit * nalu,
     READ_UE_MAX (&nr, pps->slice_group_map_type, 6);
 
     if (pps->slice_group_map_type == 0) {
-      gint i;
+      guint32 i;
 
       for (i = 0; i <= pps->num_slice_groups_minus1; i++)
         READ_UE (&nr, pps->run_length_minus1[i]);
     } else if (pps->slice_group_map_type == 2) {
-      gint i;
+      guint32 i;
 
       for (i = 0; i < pps->num_slice_groups_minus1; i++) {
         READ_UE (&nr, pps->top_left[i]);
@@ -1959,7 +1968,7 @@ gst_h264_parse_pps (GstH264NalParser * nalparser, GstH264NalUnit * nalu,
       READ_UE (&nr, pps->slice_group_change_rate_minus1);
     } else if (pps->slice_group_map_type == 6) {
       gint bits;
-      gint i;
+      guint32 i;
 
       READ_UE (&nr, pps->pic_size_in_map_units_minus1);
       bits = g_bit_storage (pps->num_slice_groups_minus1);
@@ -2092,6 +2101,8 @@ gst_h264_parser_parse_slice_hdr (GstH264NalParser * nalparser,
   gint pps_id;
   GstH264PPS *pps;
   GstH264SPS *sps;
+  UNUSED_ARGUMENT(parse_pred_weight_table);
+  UNUSED_ARGUMENT(parse_dec_ref_pic_marking);
 
   memset (slice, 0, sizeof (*slice));
 

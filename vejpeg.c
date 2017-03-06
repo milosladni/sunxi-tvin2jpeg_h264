@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2014 Manuel Braga <mul.braga@gmail.com>
+ * Copyright (c) 2016 Milos Ladicorbic <milos dot ladicorbic at gmail dot com>
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -16,12 +17,15 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
  *
  */
-
+//#include "tcsfs.h"
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <string.h>
 #include <jpeglib.h>
 #include "vepoc.h"
+
+//DEFINE_FILE_NAME(vejpeg);             /* assertions are used, this file is identified as "vejpeg" */
 
 static struct jpeg_error_mgr err;
 static struct jpeg_compress_struct jcs;
@@ -37,6 +41,9 @@ void vejpeg_header_create(int w, int h, int quality)
 	jpeg_create_compress(&jcs);
 	jpeg_mem_dest(&jcs, &outbuf, &outlen);
 
+//    char   *comment = "Komentar test";
+//    jpeg_write_marker(&jcs, JPEG_COM, (JOCTET*)comment, strlen(comment));
+
 	jcs.image_width = w;
 	jcs.image_height = h;
 	jcs.input_components = 3;
@@ -44,14 +51,22 @@ void vejpeg_header_create(int w, int h, int quality)
 	jpeg_set_defaults(&jcs);
 	jpeg_set_quality(&jcs, quality, TRUE);
 
+//	jcs.density_unit = 1; /* dots per inch */
+//	jcs.X_density = w;
+//	jcs.Y_density = h;
+
 /*
 	SOI,
 	DQT, DQT,
 	DHT, DHT, DHT, DHT,
+	SOF0, SOS
 	EOI
 */
 	jpeg_write_tables(&jcs);
 	/* EOI is also written. */
+//	char   *comment = "Komentar test";
+//	jpeg_write_marker(&jcs, JPEG_COM, (JOCTET*)comment, strlen(comment));
+//	jpeg_write_marker(&jcs, JPEG_APP0, );
 }
 
 void vejpeg_header_destroy(void)
@@ -140,4 +155,26 @@ void vejpeg_write_file(const char *filename, uint8_t *buffer, uint32_t length)
 		fclose(fp);
 	}
 }
+
+int32_t vejpeg_write_buffer (uint8_t *pDst, uint8_t *pFrame, uint32_t frameSize) {
+
+    uint32_t written = frameSize + outlen;
+    uint32_t outlen__ = outlen - 2;
+
+    //ASSERT(outlen <= 1024);                                                     //TODO delete this.. only for test
+
+    if(outlen > 2) {
+        /* copy headers *//* don't write EOI */
+        memcpy(pDst, outbuf, outlen__);
+        /* copy raw jpeg compressed image */
+        memcpy(pDst+outlen__, pFrame, frameSize);
+        /* write EOI */
+        memcpy(pDst+written-2, outbuf+outlen__, 2);
+        return written;
+    }
+
+    return -1;
+}
+
+
 

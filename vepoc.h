@@ -47,6 +47,7 @@ void vejpeg_write_SOF0(void);
 void vejpeg_write_SOS(void);
 void vejpeg_write_quantization(void);
 void vejpeg_write_file(const char *filename, uint8_t *buffer, uint32_t length);
+int32_t vejpeg_write_buffer(uint8_t *pDst, uint8_t *pFrame, uint32_t frameSize);
 
 void veisp_set_buffers(uint8_t *Y, uint8_t *C);                          /* set isp input buffers */
 void veisp_set_outputBuffers (uint8_t *pY, uint8_t *pC); /* set isp output buffers for divide-scaled raw frame */

@@ -294,7 +294,7 @@ typedef struct H264encParamTag {
 	unsigned int    bytestreamLength;
     
     h264encRefPicture_t refPic[NUM_REFERENT_PIC];                            /* referent pictures */
-    void *extra_buffer_line, *extra_buffer_frame;                              /* unknown purpose */
+    void *extra_buffer_line, *extra_buffer_frame, *extra_motion_est;           /* unknown purpose */
     
     bool_t          spsPps;                      /* sequence parameter set, picture parameter set */
     unsigned int    frameNum;                                             /* current frame number */
@@ -2908,6 +2908,7 @@ static void H264enc_init__ (void) {
     pThis->ve.h264enc.pBytestreamBuffer = NULL;
     pThis->ve.h264enc.extra_buffer_line = NULL;
     pThis->ve.h264enc.extra_buffer_frame = NULL;
+    pThis->ve.h264enc.extra_motion_est = NULL;
 }
 
 static void H264enc_new__ (void) {
@@ -2946,8 +2947,9 @@ static void H264enc_new__ (void) {
 	pThis->ve.h264enc.extra_buffer_frame = ve_malloc(ALIGN(pThis->ve.isp.scaler.mb_width, 4) * 
                                                               pThis->ve.isp.scaler.mb_height * 8);
 	pThis->ve.h264enc.extra_buffer_line = ve_malloc(pThis->ve.isp.scaler.mb_width * 32);
+    pThis->ve.h264enc.extra_motion_est = ve_malloc(pThis->ve.isp.scaler.mb_width * pThis->ve.isp.scaler.mb_height * 32);//guessing size - TODO: find out proper size
 	if (pThis->ve.h264enc.extra_buffer_frame == NULL || 
-        pThis->ve.h264enc.extra_buffer_line == NULL) {
+        pThis->ve.h264enc.extra_buffer_line == NULL || pThis->ve.h264enc.extra_motion_est == NULL) {
 		goto nomem;
     }
     
@@ -2968,6 +2970,9 @@ static void H264enc_free__ (void) {
     }
     if (pThis->ve.h264enc.extra_buffer_frame != NULL) {
         ve_free(pThis->ve.h264enc.extra_buffer_frame);
+    }
+    if (pThis->ve.h264enc.extra_motion_est != NULL) {
+        ve_free(pThis->ve.h264enc.extra_motion_est);
     }
 	/* free referent pictures */
 	for (i = 0; i < NUM_REFERENT_PIC; i++) {
@@ -3045,6 +3050,7 @@ static int H264enc_encodePicture__ (void) {
 	/* set unknown purpose buffers */
 	writel(ve_virt2phys(pThis->ve.h264enc.extra_buffer_line), pThis->ve.pRegs + VE_AVC_MB_INFO);
 	writel(ve_virt2phys(pThis->ve.h264enc.extra_buffer_frame), pThis->ve.pRegs + VE_AVC_UNK_BUF);
+    writel(ve_virt2phys(pThis->ve.h264enc.extra_motion_est), pThis->ve.pRegs + 0xbc4);
 
 	/* enable interrupt and clear status flags */
 	writel(readl(pThis->ve.pRegs + VE_AVC_CTRL) | 0xf, pThis->ve.pRegs + VE_AVC_CTRL);
@@ -3061,7 +3067,7 @@ static int H264enc_encodePicture__ (void) {
 	writel(params, pThis->ve.pRegs + VE_AVC_PARAM);
 	writel((4 << 16) | (pThis->ve.h264enc.qp << 8) | 
             pThis->ve.h264enc.qp, pThis->ve.pRegs + VE_AVC_QP);
-	writel(0x00000104, pThis->ve.pRegs + VE_AVC_MOTION_EST);
+	writel(0x00040104, pThis->ve.pRegs + VE_AVC_MOTION_EST);
 
 	/* trigger encoding */
 	writel(0x8, pThis->ve.pRegs + VE_AVC_TRIGGER);

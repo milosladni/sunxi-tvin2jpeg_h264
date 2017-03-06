@@ -207,6 +207,14 @@ void ve_flush_cache(void *start, int len) {                /* flush cache (neded
 	ioctl(ve.fd, IOCTL_FLUSH_CACHE, (void*)(&cacheRange)); /* 0x20b */ /* do invalidate CPU cache for internal cedar dma  */
 }
 
+void ve_reset_ioctl(void) {                                                        /* reset ioctl */
+
+	if (ve.fd == -1)
+		return;
+
+    ioctl(ve.fd, IOCTL_RESET_VE, 0);                              /* 0x103 do reset cedarx engine */
+}
+
 void *ve_get_regs(void) {
     
 	if (ve.fd == -1)

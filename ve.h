@@ -27,6 +27,7 @@ void ve_init(void);
 void* ve_open(void);
 void ve_close(void);
 void ve_flush_cache(void *start, int len);
+void ve_reset_ioctl(void);
 void *ve_get_regs(void);
 int ve_get_version(void);
 int ve_wait(int timeout);

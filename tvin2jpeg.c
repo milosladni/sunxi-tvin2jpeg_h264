@@ -2807,7 +2807,9 @@ static void Ve_selectSubengine__ (Appl_t *pThis, VeSubengType_t subengine) {
     CriticalSectionEnter__(&pThis->ve.mutex);                                          /* lock hw */
     
     DBG(KYEL"%s -> ENTER -> Type: %s"KNRM, __FUNCTION__, subengNames[subengine]);
-
+    
+    ve_reset_ioctl();
+    
     switch (subengine) {
         case SUBENG_JPEG_ENC: {                                                   /* jpeg encoder */
             veavc_select_subengine(VE_ENGINE_AVC);
